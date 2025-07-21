@@ -42,13 +42,14 @@ operator:
   # -- Pod security context settings
   podSecurityContext:
     runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
 
   # -- Container security context settings for the operator
   containerSecurityContext:
     allowPrivilegeEscalation: false
     readOnlyRootFilesystem: true
     runAsNonRoot: true
-    runAsUser: 1000
     capabilities:
       drop:
       - ALL
