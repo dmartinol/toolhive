@@ -1,0 +1,232 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.3
+  name: mcpregistries.toolhive.stacklok.dev
+spec:
+  group: toolhive.stacklok.dev
+  names:
+    kind: MCPRegistry
+    listKind: MCPRegistryList
+    plural: mcpregistries
+    singular: mcpregistry
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Status
+      type: string
+    - jsonPath: .spec.url
+      name: URL
+      type: string
+    - jsonPath: .status.serverCount
+      name: Servers
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: MCPRegistry is the Schema for the mcpregistries API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: MCPRegistrySpec defines the desired state of MCPRegistry
+            properties:
+              authentication:
+                description: Authentication defines authentication configuration for
+                  the registry
+                properties:
+                  passwordSecretRef:
+                    description: PasswordSecretRef references a secret containing
+                      the password
+                    properties:
+                      key:
+                        description: Key is the key in the secret itself
+                        type: string
+                      name:
+                        description: Name is the name of the secret
+                        type: string
+                      targetEnvName:
+                        description: |-
+                          TargetEnvName is the environment variable to be used when setting up the secret in the MCP server
+                          If left unspecified, it defaults to the key
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                  tokenSecretRef:
+                    description: TokenSecretRef references a secret containing the
+                      bearer token
+                    properties:
+                      key:
+                        description: Key is the key in the secret itself
+                        type: string
+                      name:
+                        description: Name is the name of the secret
+                        type: string
+                      targetEnvName:
+                        description: |-
+                          TargetEnvName is the environment variable to be used when setting up the secret in the MCP server
+                          If left unspecified, it defaults to the key
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                  type:
+                    default: none
+                    description: Type is the type of authentication
+                    enum:
+                    - basic
+                    - bearer
+                    - none
+                    type: string
+                  username:
+                    description: Username is the username for basic authentication
+                    type: string
+                required:
+                - type
+                type: object
+              insecureSkipVerify:
+                default: false
+                description: InsecureSkipVerify allows skipping TLS verification for
+                  HTTPS registries
+                type: boolean
+              refreshInterval:
+                default: 1h
+                description: RefreshInterval is the interval to refresh the registry
+                  data
+                type: string
+              timeout:
+                default: 30s
+                description: Timeout is the timeout for registry operations
+                type: string
+              type:
+                default: http
+                description: Type is the type of registry (e.g., "http", "file", "embedded")
+                enum:
+                - http
+                - file
+                - embedded
+                type: string
+              url:
+                description: URL is the URL of the MCP registry
+                type: string
+            required:
+            - url
+            type: object
+          status:
+            description: MCPRegistryStatus defines the observed state of MCPRegistry
+            properties:
+              availableServers:
+                description: AvailableServers is a list of available MCP server names
+                items:
+                  type: string
+                type: array
+              conditions:
+                description: Conditions represent the latest available observations
+                  of the MCPRegistry's state
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              lastSyncTime:
+                description: LastSyncTime is the timestamp of the last successful
+                  sync
+                format: date-time
+                type: string
+              message:
+                description: Message provides additional information about the current
+                  phase
+                type: string
+              phase:
+                description: Phase is the current phase of the MCPRegistry
+                enum:
+                - Pending
+                - Ready
+                - Failed
+                - Syncing
+                type: string
+              serverCount:
+                description: ServerCount is the number of MCP servers available in
+                  this registry
+                format: int32
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -1,6 +1,6 @@
 domain: toolhive.stacklok.dev
 layout:
-- go.kubebuilder.io/v3
+- go.kubebuilder.io/v4
 projectName: thv-operator
 repo: github.com/stacklok/toolhive
 resources:
@@ -11,6 +11,15 @@ resources:
   domain: toolhive.stacklok.dev
   group: toolhive
   kind: MCPServer
+  path: github.com/stacklok/toolhive/cmd/thv-operator/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: toolhive.stacklok.dev
+  group: toolhive
+  kind: MCPRegistry
   path: github.com/stacklok/toolhive/cmd/thv-operator/api/v1alpha1
   version: v1alpha1
 version: "3"
