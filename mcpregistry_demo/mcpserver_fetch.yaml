@@ -1,0 +1,47 @@
+apiVersion: toolhive.stacklok.dev/v1alpha1
+kind: MCPServer
+metadata:
+  annotations:
+    toolhive.stacklok.dev/server-detail: |
+      {
+        "id": "c2f4ab61-b279-4cb9-932d-5f60bcd1534a",
+        "name": "io.github.zcaceres/fetch-mcp",
+        "description": "A flexible HTTP fetching Model Context Protocol server.",
+        "repository": {
+          "url": "https://github.com/zcaceres/fetch-mcp",
+          "source": "github",
+          "id": "905004409"
+        },
+        "version_detail": {
+          "version": "0.0.1-seed",
+          "release_date": "2025-05-16T19:06:44Z",
+          "is_latest": true
+        },
+        "packages": [
+          {
+            "registry_name": "pypi",
+            "name": "fetch",
+            "version": "1.0.0"
+          }
+        ]
+      }
+  labels:
+    toolhive.stacklok.dev/registry-name: example-registry
+    toolhive.stacklok.dev/registry-namespace: toolhive-system
+  name: fetch
+  namespace: toolhive-system
+spec:
+  image: ghcr.io/stackloklabs/gofetch/server
+  transport: streamable-http
+  port: 8080
+  targetPort: 8080
+  permissionProfile:
+    type: builtin
+    name: network
+  resources:
+    limits:
+      cpu: "100m"
+      memory: "128Mi"
+    requests:
+      cpu: "50m"
+      memory: "64Mi"

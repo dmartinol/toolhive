@@ -1,0 +1,23 @@
+{
+  "id": "d34db6e7-6192-46df-9838-bd9694b428a5",
+  "name": "io.github.modelcontextprotocol/everything",
+  "description": "This MCP server attempts to exercise all the features of the MCP protocol",
+  "repository": {
+    "url": "https://github.com/modelcontextprotocol/servers",
+    "source": "github",
+    "id": "890668799"
+  },
+  "version_detail": {
+    "version": "0.0.1-seed",
+    "release_date": "2025-07-30T00:23:30Z",
+    "is_latest": true
+  },
+  "env_vars": [],
+  "packages": [
+    {
+      "registry_name": "docker",
+      "name": "mcp/everything",
+      "version": "latest"
+    }
+  ]
+}

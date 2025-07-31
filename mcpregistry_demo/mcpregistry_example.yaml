@@ -1,0 +1,11 @@
+apiVersion: toolhive.stacklok.dev/v1alpha1
+kind: MCPRegistry
+metadata:
+  name: example-registry
+  namespace: toolhive-system
+spec:
+  # How often to refresh the registry data
+  refreshInterval: "1h"
+  
+  # Timeout for registry operations
+  timeout: "30s"

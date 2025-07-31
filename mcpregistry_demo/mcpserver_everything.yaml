@@ -1,0 +1,23 @@
+apiVersion: toolhive.stacklok.dev/v1alpha1
+kind: MCPServer
+metadata:
+  labels:
+    toolhive.stacklok.dev/registry-name: example-registry
+    toolhive.stacklok.dev/registry-namespace: toolhive-system
+    toolhive.stacklok.dev/registered-server-id: d34db6e7-6192-46df-9838-bd9694b428a5
+  name: everything
+  namespace: toolhive-system
+spec:
+  image: docker.io/mcp/everything:latest
+  permissionProfile:
+    name: network
+    type: builtin
+  port: 8080
+  resources:
+    limits:
+      cpu: 100m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  transport: stdio
