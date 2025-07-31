@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server" // Import for metricsserver
 	"sigs.k8s.io/controller-runtime/pkg/webhook"                      // Import for webhook
 
@@ -52,8 +53,22 @@ func main() {
 	// Initialize the structured logger
 	logger.Initialize()
 
+	// // Reduce HTTP client logging verbosity to eliminate hex dumps
+	// os.Setenv("KUBERNETES_CLIENT_LOG_LEVEL", "0")
+	// os.Setenv("KUBERNETES_CLIENT_LOG_VERBOSITY", "0")
+	// os.Setenv("KUBERNETES_CLIENT_LOG_BODY", "false")
+	// os.Setenv("KUBERNETES_CLIENT_LOG_HEADERS", "false")
+	// os.Setenv("KUBERNETES_CLIENT_LOG_REQUEST", "false")
+	// os.Setenv("KUBERNETES_CLIENT_LOG_RESPONSE", "false")
+
 	// Set the controller-runtime logger to use our structured logger
-	ctrl.SetLogger(logger.NewLogr())
+	opts := zap.Options{
+		Development: true,
+	}
+	opts.BindFlags(flag.CommandLine)
+	flag.Parse()
+
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	options := ctrl.Options{
 		Scheme:                 scheme,

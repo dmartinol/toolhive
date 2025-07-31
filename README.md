@@ -44,6 +44,7 @@ setup, no security headaches, no runtime hassles.
   Kubernetes Operator for production and scale.
 - **Seamless integration:** ToolHive auto-configures popular clients like GitHub
   Copilot, Cursor, and more.
+- **Advanced registry management:** Metadata-based discovery with self-registration and pre-registration paths for flexible server management.
 
 ToolHive is available as a GUI desktop app, CLI, and Kubernetes Operator.
 
@@ -66,6 +67,61 @@ ToolHive is available as a GUI desktop app, CLI, and Kubernetes Operator.
   - [CLI](https://docs.stacklok.com/toolhive/tutorials/quickstart-cli)
   - [Kubernetes Operator](https://docs.stacklok.com/toolhive/tutorials/quickstart-k8s)
 - 💬 [Discord](https://discord.gg/stacklok)
+
+## Latest Features
+
+### Kubernetes Operator Enhancements
+
+The ToolHive Kubernetes Operator now supports advanced registry management with a **Metadata-Based Discovery Pattern**:
+
+#### Self-Registration Path
+Servers can register themselves with complete metadata using the `mcp.opendatahub.io/server-detail` annotation:
+
+```yaml
+apiVersion: toolhive.stacklok.dev/v1alpha1
+kind: MCPServer
+metadata:
+  name: my-server
+  annotations:
+    mcp.opendatahub.io/server-detail: |
+      {
+        "id": "4a097d31-ea39-43aa-9af5-6f19a7676901",
+        "name": "io.github.manusa/kubernetes-mcp-server",
+        "description": "Model Context Protocol (MCP) server for Kubernetes",
+        "repository": {
+          "url": "https://github.com/manusa/kubernetes-mcp-server",
+          "source": "github"
+        },
+        "version_detail": {
+          "version": "0.0.1-seed",
+          "release_date": "2025-05-16T19:09:03Z",
+          "is_latest": true
+        }
+      }
+  labels:
+    toolhive.stacklok.dev/registry-name: my-registry
+    toolhive.stacklok.dev/registry-namespace: toolhive-system
+```
+
+#### Pre-Registration Path
+Servers can link to existing registry entries using the `toolhive.stacklok.dev/registered-server-id` label:
+
+```yaml
+apiVersion: toolhive.stacklok.dev/v1alpha1
+kind: MCPServer
+metadata:
+  name: my-server
+  labels:
+    toolhive.stacklok.dev/registry-name: my-registry
+    toolhive.stacklok.dev/registry-namespace: toolhive-system
+    toolhive.stacklok.dev/registered-server-id: d34db6e7-6192-46df-9838-bd9694b428a5
+```
+
+This flexible approach allows for:
+- **Independent controllers** - Servers and registries can exist independently
+- **Cross-namespace discovery** - Registries can aggregate servers from multiple namespaces
+- **Event-driven updates** - Automatic registry updates when servers change
+- **MongoDB persistence** - Reliable storage with clear audit trails
 
 ---
 

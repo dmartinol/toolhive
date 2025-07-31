@@ -18,9 +18,6 @@ spec:
     - jsonPath: .status.phase
       name: Status
       type: string
-    - jsonPath: .spec.url
-      name: URL
-      type: string
     - jsonPath: .status.serverCount
       name: Servers
       type: integer
@@ -52,67 +49,6 @@ spec:
           spec:
             description: MCPRegistrySpec defines the desired state of MCPRegistry
             properties:
-              authentication:
-                description: Authentication defines authentication configuration for
-                  the registry
-                properties:
-                  passwordSecretRef:
-                    description: PasswordSecretRef references a secret containing
-                      the password
-                    properties:
-                      key:
-                        description: Key is the key in the secret itself
-                        type: string
-                      name:
-                        description: Name is the name of the secret
-                        type: string
-                      targetEnvName:
-                        description: |-
-                          TargetEnvName is the environment variable to be used when setting up the secret in the MCP server
-                          If left unspecified, it defaults to the key
-                        type: string
-                    required:
-                    - key
-                    - name
-                    type: object
-                  tokenSecretRef:
-                    description: TokenSecretRef references a secret containing the
-                      bearer token
-                    properties:
-                      key:
-                        description: Key is the key in the secret itself
-                        type: string
-                      name:
-                        description: Name is the name of the secret
-                        type: string
-                      targetEnvName:
-                        description: |-
-                          TargetEnvName is the environment variable to be used when setting up the secret in the MCP server
-                          If left unspecified, it defaults to the key
-                        type: string
-                    required:
-                    - key
-                    - name
-                    type: object
-                  type:
-                    default: none
-                    description: Type is the type of authentication
-                    enum:
-                    - basic
-                    - bearer
-                    - none
-                    type: string
-                  username:
-                    description: Username is the username for basic authentication
-                    type: string
-                required:
-                - type
-                type: object
-              insecureSkipVerify:
-                default: false
-                description: InsecureSkipVerify allows skipping TLS verification for
-                  HTTPS registries
-                type: boolean
               refreshInterval:
                 default: 1h
                 description: RefreshInterval is the interval to refresh the registry
@@ -122,28 +58,10 @@ spec:
                 default: 30s
                 description: Timeout is the timeout for registry operations
                 type: string
-              type:
-                default: http
-                description: Type is the type of registry (e.g., "http", "file", "embedded")
-                enum:
-                - http
-                - file
-                - embedded
-                type: string
-              url:
-                description: URL is the URL of the MCP registry
-                type: string
-            required:
-            - url
             type: object
           status:
             description: MCPRegistryStatus defines the observed state of MCPRegistry
             properties:
-              availableServers:
-                description: AvailableServers is a list of available MCP server names
-                items:
-                  type: string
-                type: array
               conditions:
                 description: Conditions represent the latest available observations
                   of the MCPRegistry's state
@@ -210,6 +128,14 @@ spec:
               message:
                 description: Message provides additional information about the current
                   phase
+                type: string
+              mongodbCollectionName:
+                description: MongoDBCollectionName is the name of the MongoDB collection
+                  used by this registry
+                type: string
+              mongodbServiceURL:
+                description: MongoDBServiceURL is the URL of the MongoDB service used
+                  by this registry
                 type: string
               phase:
                 description: Phase is the current phase of the MCPRegistry

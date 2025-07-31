@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 
 	mcpv1alpha1 "github.com/stacklok/toolhive/cmd/thv-operator/api/v1alpha1"
 )
@@ -177,4 +178,67 @@ func TestRegistryAuthentication_Validation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestExtractServerDetailsFromMCPServer(t *testing.T) {
+	// Create a test MCPServer
+	server := &mcpv1alpha1.MCPServer{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-server",
+			Namespace: "test-namespace",
+		},
+		Spec: mcpv1alpha1.MCPServerSpec{
+			Image:     "ghcr.io/stackloklabs/gofetch/server:latest",
+			Transport: "streamable-http",
+			Port:      8080,
+		},
+	}
+
+	// Create reconciler
+	reconciler := &MCPRegistryReconciler{
+		Scheme: &runtime.Scheme{},
+	}
+
+	// Extract server details
+	serverDetail, err := reconciler.extractServerDetailsFromMCPServer(server)
+	if err != nil {
+		t.Fatalf("Failed to extract server details: %v", err)
+	}
+
+	// Verify the extracted details
+	if serverDetail.Server.Name != "test-server" {
+		t.Errorf("Expected server name 'test-server', got '%s'", serverDetail.Server.Name)
+	}
+
+	if serverDetail.Server.ID == "" {
+		t.Error("Expected server ID to be set")
+	}
+
+	if len(serverDetail.Packages) != 1 {
+		t.Errorf("Expected 1 package, got %d", len(serverDetail.Packages))
+	}
+
+	if serverDetail.Packages[0].Name != "ghcr.io/stackloklabs/gofetch/server" {
+		t.Errorf("Expected package name 'ghcr.io/stackloklabs/gofetch/server', got '%s'", serverDetail.Packages[0].Name)
+	}
+
+	if serverDetail.Packages[0].Version != "latest" {
+		t.Errorf("Expected package version 'latest', got '%s'", serverDetail.Packages[0].Version)
+	}
+
+	if len(serverDetail.Remotes) != 1 {
+		t.Errorf("Expected 1 remote, got %d", len(serverDetail.Remotes))
+	}
+
+	if serverDetail.Remotes[0].TransportType != "streamable-http" {
+		t.Errorf("Expected transport type 'streamable-http', got '%s'", serverDetail.Remotes[0].TransportType)
+	}
+
+	expectedURL := "http://mcp-test-server-proxy.test-namespace.svc.cluster.local:8080"
+	if serverDetail.Remotes[0].URL != expectedURL {
+		t.Errorf("Expected URL '%s', got '%s'", expectedURL, serverDetail.Remotes[0].URL)
+	}
+
+	t.Logf("Successfully extracted server details: ID=%s, Name=%s, Packages=%d, Remotes=%d",
+		serverDetail.Server.ID, serverDetail.Server.Name, len(serverDetail.Packages), len(serverDetail.Remotes))
 }

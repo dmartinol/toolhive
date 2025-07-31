@@ -6,12 +6,22 @@ This operator is built using [Kubebuilder](https://book.kubebuilder.io/), a fram
 
 ## Overview
 
-The operator introduces a new Custom Resource Definition (CRD) called `MCPServer` that represents an MCP server in Kubernetes. When you create an `MCPServer` resource, the operator automatically:
+The operator introduces two Custom Resource Definitions (CRDs):
+- `MCPServer` - represents an MCP server in Kubernetes
+- `MCPRegistry` - collects and manages information about deployed MCP servers
+
+When you create an `MCPServer` resource, the operator automatically:
 
 1. Creates a Deployment to run the MCP server
 2. Sets up a Service to expose the MCP server
 3. Configures the appropriate permissions and settings
 4. Manages the lifecycle of the MCP server
+
+When you create an `MCPRegistry` resource, the operator:
+
+1. Monitors MCPServer resources across namespaces
+2. Maintains a MongoDB database with server information
+3. Provides centralized discovery and management of MCP servers
 
 ```mermaid
 ---
@@ -57,6 +67,7 @@ flowchart LR
 
 - Kubernetes cluster (v1.19+)
 - kubectl configured to communicate with your cluster
+- MongoDB instance (for registry functionality)
 
 ### Installing the Operator via Helm
 
@@ -141,6 +152,54 @@ The `secrets` field has the following parameters:
 - `key`: The key in the secret itself (required)
 - `targetEnvName`: The environment variable to be used when setting up the secret in the MCP server (optional). If left unspecified, it defaults to the key.
 
+### Creating an MCP Registry
+
+To create an MCP registry that collects information about deployed servers:
+
+```yaml
+apiVersion: toolhive.stacklok.dev/v1alpha1
+kind: MCPRegistry
+metadata:
+  name: my-registry
+  namespace: toolhive-system
+spec:
+  url: "mongodb://mongodb:27017"
+  type: "mongodb"
+  refreshInterval: "1h"
+  timeout: "30s"
+  authentication:
+    type: "basic"
+    username: "registry-user"
+    passwordSecretRef:
+      name: "mongodb-secret"
+      key: "password"
+```
+
+### Linking MCPServers to Registries
+
+To associate an MCPServer with a registry, add annotations to the MCPServer:
+
+```yaml
+apiVersion: toolhive.stacklok.dev/v1alpha1
+kind: MCPServer
+metadata:
+  name: my-server
+  namespace: default
+  annotations:
+    toolhive.stacklok.dev/registry-name: "my-registry"
+    toolhive.stacklok.dev/registry-namespace: "toolhive-system"
+spec:
+  image: docker.io/mcp/fetch
+  transport: stdio
+  port: 8080
+  # ... other spec fields
+```
+
+The registry controller will automatically:
+1. Monitor MCPServer resources with registry annotations
+2. Store server information in MongoDB
+3. Update the registry status with server counts and availability
+
 ### Checking MCP Server Status
 
 To check the status of your MCP servers:
@@ -156,6 +215,73 @@ For more details about a specific MCP server:
 ```bash
 kubectl describe mcpserver <name>
 ```
+
+### Checking MCP Registry Status
+
+To check the status of your MCP registries:
+
+```bash
+kubectl get mcpregistries
+```
+
+This will show the status, URL, server count, and age of each registry.
+
+For more details about a specific registry:
+
+```bash
+kubectl describe mcpregistry <name>
+```
+
+## Registry Strategy
+
+The ToolHive operator implements an event-driven registry strategy with the following characteristics:
+
+### Architecture
+
+- **Registry Controller Monitors Servers**: The MCPRegistry controller watches MCPServer resources and reacts to their lifecycle events (create/update/delete)
+- **Decoupled Design**: MCPServers remain independent of registry implementation details
+- **Cross-Namespace Discovery**: Registries can aggregate servers from multiple namespaces
+- **MongoDB Storage**: Server information is stored in MongoDB for persistence and querying
+
+### Linking Strategy
+
+MCPServers are linked to registries using Kubernetes annotations:
+
+- `toolhive.stacklok.dev/registry-name`: The name of the registry
+- `toolhive.stacklok.dev/registry-namespace`: The namespace containing the registry
+
+### Event Flow
+
+1. **Server Creation**: When an MCPServer is created with registry annotations, the registry controller detects the change
+2. **Database Update**: The controller stores server information in MongoDB
+3. **Status Update**: The registry status is updated with server counts and availability
+4. **Server Deletion**: When a server is deleted, it's automatically removed from the registry database
+
+### MongoDB Schema
+
+The registry stores server information in MongoDB with the following structure:
+
+```json
+{
+  "_id": "namespace/server-name",
+  "name": "server-name",
+  "namespace": "namespace",
+  "registry_id": "registry-namespace/registry-name",
+  "url": "http://server-url",
+  "transport": "stdio|sse|streamable-http",
+  "status": "Ready|Pending|Failed",
+  "created_at": "2024-01-01T00:00:00Z",
+  "updated_at": "2024-01-01T00:00:00Z"
+}
+```
+
+### Benefits
+
+- **Event-Driven**: Registry automatically updates when servers change
+- **Scalable**: Can handle multiple registries and namespaces
+- **Observable**: Clear audit trail in MongoDB
+- **Flexible**: Easy to add more metadata or change storage backend
+- **Single Source of Truth**: MCPServers remain the authoritative source
 
 ## Configuration Reference
 
@@ -174,6 +300,17 @@ kubectl describe mcpserver <name>
 | `secrets`           | References to secrets to mount in the container  | No       | -       |
 | `permissionProfile` | Permission profile configuration                 | No       | -       |
 | `tools`             | Allow-list filter on the list of tools           | No       | -       |
+
+### MCPRegistry Spec
+
+| Field               | Description                                      | Required | Default |
+|---------------------|--------------------------------------------------|----------|---------|
+| `url`               | MongoDB connection URL                           | Yes      | -       |
+| `type`              | Registry type (mongodb)                          | No       | mongodb |
+| `refreshInterval`   | How often to refresh registry data               | No       | 1h      |
+| `timeout`           | Timeout for registry operations                  | No       | 30s     |
+| `authentication`    | Authentication configuration                     | No       | -       |
+| `insecureSkipVerify`| Skip TLS verification for HTTPS connections     | No       | false   |
 
 ### Permission Profiles
 

@@ -2,71 +2,10 @@ apiVersion: toolhive.stacklok.dev/v1alpha1
 kind: MCPRegistry
 metadata:
   name: example-registry
-  namespace: default
+  namespace: toolhive-system
 spec:
-  # URL of the MCP registry
-  url: "https://registry.example.com/mcp-servers"
-  
-  # Type of registry (http, file, or embedded)
-  type: "http"
-  
   # How often to refresh the registry data
   refreshInterval: "1h"
   
   # Timeout for registry operations
   timeout: "30s"
-  
-  # Skip TLS verification (use with caution)
-  insecureSkipVerify: false
-  
-  # Authentication configuration (optional)
-  authentication:
-    # Type of authentication (basic, bearer, or none)
-    type: "none"
-    
-    # For basic authentication:
-    # username: "user"
-    # passwordSecretRef:
-    #   name: "registry-password-secret"
-    #   key: "password"
-    
-    # For bearer token authentication:
-    # type: "bearer"
-    # tokenSecretRef:
-    #   name: "registry-token-secret"
-    #   key: "token"
----
-# Example with basic authentication
-apiVersion: toolhive.stacklok.dev/v1alpha1
-kind: MCPRegistry
-metadata:
-  name: authenticated-registry
-  namespace: default
-spec:
-  url: "https://private-registry.example.com/mcp-servers"
-  type: "http"
-  refreshInterval: "30m"
-  timeout: "60s"
-  authentication:
-    type: "basic"
-    username: "registry-user"
-    passwordSecretRef:
-      name: "registry-credentials"
-      key: "password"
----
-# Example with bearer token authentication
-apiVersion: toolhive.stacklok.dev/v1alpha1
-kind: MCPRegistry
-metadata:
-  name: token-registry
-  namespace: default
-spec:
-  url: "https://api.github.com/repos/example/mcp-registry/contents"
-  type: "http"
-  refreshInterval: "2h"
-  timeout: "45s"
-  authentication:
-    type: "bearer"
-    tokenSecretRef:
-      name: "github-token"
-      key: "token" 

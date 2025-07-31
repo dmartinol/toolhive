@@ -42,10 +42,15 @@ rules:
   resources:
   - pods
   - secrets
+  - persistentvolumeclaims
   verbs:
   - get
   - list
   - watch
+  - create
+  - delete
+  - patch
+  - update
 - apiGroups:
   - apps
   resources:
@@ -80,6 +85,32 @@ rules:
   - toolhive.stacklok.dev
   resources:
   - mcpservers/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - toolhive.stacklok.dev
+  resources:
+  - mcpregistries
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - toolhive.stacklok.dev
+  resources:
+  - mcpregistries/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - toolhive.stacklok.dev
+  resources:
+  - mcpregistries/status
   verbs:
   - get
   - patch
