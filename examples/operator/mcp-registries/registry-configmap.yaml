@@ -1,0 +1,135 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: toolhive-registry-data
+  namespace: toolhive-system
+  labels:
+    app.kubernetes.io/name: toolhive-registry
+    app.kubernetes.io/component: registry-data
+    app.kubernetes.io/part-of: toolhive
+data:
+  registry.json: |
+    {
+      "$schema": "https://raw.githubusercontent.com/stacklok/toolhive/main/pkg/registry/data/schema.json",
+      "version": "1.0.0",
+      "last_updated": "2025-09-02T00:17:21Z",
+      "servers": {
+        "adb-mysql-mcp-server": {
+          "description": "Official MCP server for AnalyticDB for MySQL of Alibaba Cloud",
+          "tier": "Official",
+          "status": "Active",
+          "transport": "stdio",
+          "tools": [
+            "execute_sql",
+            "get_query_plan",
+            "get_execution_plan"
+          ],
+          "metadata": {
+            "stars": 15,
+            "pulls": 0,
+            "last_updated": "2025-08-22T09:45:12Z"
+          },
+          "repository_url": "https://github.com/aliyun/alibabacloud-adb-mysql-mcp-server",
+          "tags": [
+            "database",
+            "mysql",
+            "analytics",
+            "sql",
+            "alibaba-cloud",
+            "data-warehouse"
+          ],
+          "image": "ghcr.io/stacklok/dockyard/uvx/adb-mysql-mcp-server:1.0.0",
+          "command": ["uvx", "adb-mysql-mcp-server"],
+          "args": [],
+          "environments": [
+            {
+              "name": "development",
+              "description": "Development environment",
+              "config": {
+                "env": {
+                  "ADB_MYSQL_ENDPOINT": "your-adb-mysql-endpoint",
+                  "ADB_MYSQL_ACCESS_KEY_ID": "your-access-key-id",
+                  "ADB_MYSQL_ACCESS_KEY_SECRET": "your-access-key-secret",
+                  "ADB_MYSQL_DATABASE": "your-database-name"
+                }
+              }
+            }
+          ]
+        },
+        "filesystem": {
+          "description": "MCP server for filesystem operations, providing tools to read, write, and manipulate files and directories on the local filesystem.",
+          "tier": "Official",
+          "status": "Active",
+          "transport": "stdio",
+          "tools": [
+            "read_file",
+            "read_multiple_files",
+            "write_file",
+            "create_directory",
+            "list_directory",
+            "move_file",
+            "search_files",
+            "get_file_info"
+          ],
+          "metadata": {
+            "stars": 120,
+            "pulls": 5200,
+            "last_updated": "2025-08-30T14:22:33Z"
+          },
+          "repository_url": "https://github.com/modelcontextprotocol/servers",
+          "tags": [
+            "filesystem",
+            "files",
+            "directories",
+            "local"
+          ],
+          "image": "ghcr.io/stacklok/dockyard/uvx/mcp-server-filesystem:0.5.0",
+          "command": ["uvx", "mcp-server-filesystem"],
+          "args": [],
+          "environments": [
+            {
+              "name": "development",
+              "description": "Development environment with basic file access",
+              "config": {
+                "args": ["--base-directory", "/tmp/mcp-filesystem"]
+              }
+            }
+          ]
+        },
+        "brave-search": {
+          "description": "MCP server for Brave Search API, providing web search capabilities.",
+          "tier": "Official", 
+          "status": "Active",
+          "transport": "stdio",
+          "tools": [
+            "brave_web_search"
+          ],
+          "metadata": {
+            "stars": 85,
+            "pulls": 2100,
+            "last_updated": "2025-08-28T11:15:45Z"
+          },
+          "repository_url": "https://github.com/modelcontextprotocol/servers",
+          "tags": [
+            "search",
+            "web",
+            "api",
+            "brave"
+          ],
+          "image": "ghcr.io/stacklok/dockyard/uvx/mcp-server-brave-search:0.5.0",
+          "command": ["uvx", "mcp-server-brave-search"],
+          "args": [],
+          "environments": [
+            {
+              "name": "production",
+              "description": "Production environment with Brave Search API",
+              "config": {
+                "env": {
+                  "BRAVE_API_KEY": "your-brave-api-key"
+                }
+              }
+            }
+          ]
+        }
+      }
+    }

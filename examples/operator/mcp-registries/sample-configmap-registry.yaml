@@ -1,0 +1,28 @@
+apiVersion: toolhive.stacklok.dev/v1alpha1
+kind: MCPRegistry
+metadata:
+  name: toolhive-community-registry
+  namespace: toolhive-system
+spec:
+  displayName: "ToolHive Community Registry"
+  format: toolhive
+  source:
+    type: configmap
+    configmap:
+      name: toolhive-registry-data
+      key: registry.json
+  syncPolicy:
+    type: automatic
+    interval: "1h"
+    retryPolicy:
+      maxAttempts: 3
+      backoffInterval: "30s"
+      backoffMultiplier: "2.0"
+  filter:
+    tags:
+      include:
+        - "database"
+        - "api"
+        - "filesystem"
+      exclude:
+        - "experimental"
