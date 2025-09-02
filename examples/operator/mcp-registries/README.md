@@ -85,10 +85,12 @@ The registry is configured for automatic synchronization:
 ```yaml
 syncPolicy:
   type: automatic          # Can be "automatic" or "manual"
-  interval: "1h"          # Sync every hour
+  interval: "1h"           # Sync interval using Go duration format
+                          # Valid units: s, m, h
+                          # Examples: "3m", "1h", "24h", "168h"
   retryPolicy:
     maxAttempts: 3
-    backoffInterval: "30s"
+    backoffInterval: "30s"  # Retry delay (same format as interval)
     backoffMultiplier: "2.0"
 ```
 
@@ -106,6 +108,52 @@ filter:
     exclude:              # Exclude servers with these tags
       - "experimental"
 ```
+
+## Sync Interval Formats
+
+MCPRegistry uses Go's duration format for specifying time intervals. Here are the supported formats:
+
+### Time Units
+- `s` - seconds
+- `m` - minutes
+- `h` - hours
+
+### Example Intervals
+```yaml
+# Common intervals
+interval: "30s"     # 30 seconds
+interval: "3m"      # 3 minutes  
+interval: "1h"      # 1 hour
+interval: "12h"     # 12 hours
+
+# Longer intervals (using hours)
+interval: "24h"     # 1 day
+interval: "168h"    # 1 week (7 × 24h)
+interval: "720h"    # 1 month (30 × 24h)
+interval: "8760h"   # 1 year (365 × 24h)
+
+# Combined units
+interval: "1h30m"   # 1 hour 30 minutes
+interval: "2h15m30s" # 2 hours 15 minutes 30 seconds
+
+# Decimal values
+interval: "1.5h"    # 1.5 hours (90 minutes)
+interval: "0.5h"    # 30 minutes
+```
+
+### Recommended Intervals
+- **Development**: `"1m"` - `"5m"` (frequent testing)
+- **Staging**: `"15m"` - `"1h"` (moderate frequency)  
+- **Production**: `"1h"` - `"24h"` (conservative, stable)
+- **Long-term**: `"168h"` (weekly), `"720h"` (monthly) for stable registries
+
+### Note on Long Intervals
+Go's duration format doesn't support `d` (days), `w` (weeks), or `M` (months) units directly. 
+For longer intervals, use hours:
+- 1 day = `"24h"`
+- 1 week = `"168h"` 
+- 1 month (30 days) = `"720h"`
+- 1 year = `"8760h"`
 
 ## Available Source Types
 

@@ -6,12 +6,24 @@ This operator is built using [Kubebuilder](https://book.kubebuilder.io/), a fram
 
 ## Overview
 
-The operator introduces a new Custom Resource Definition (CRD) called `MCPServer` that represents an MCP server in Kubernetes. When you create an `MCPServer` resource, the operator automatically:
+The operator introduces two Custom Resource Definitions (CRDs) for managing MCP infrastructure:
+
+### MCPServer
+Represents an individual MCP server in Kubernetes. When you create an `MCPServer` resource, the operator automatically:
 
 1. Creates a Deployment to run the MCP server
 2. Sets up a Service to expose the MCP server
 3. Configures the appropriate permissions and settings
 4. Manages the lifecycle of the MCP server
+
+### MCPRegistry
+Manages MCP server registries for centralized server definitions. When you create an `MCPRegistry` resource, the operator automatically:
+
+1. Synchronizes registry data from various sources (ConfigMap, URL, Git)
+2. Converts between different registry formats (ToolHive and upstream)
+3. Stores processed registry data in ConfigMaps (configurable storage backends planned for future releases)
+4. Provides automatic or manual synchronization policies
+5. Enables GitOps workflows for registry management
 
 ```mermaid
 ---
@@ -73,6 +85,38 @@ helm upgrade -i <release_name> oci://ghcr.io/stacklok/toolhive/toolhive-operator
 ```
 
 ## Usage
+
+### Managing MCP Registries
+
+To create an MCP registry that syncs from a ConfigMap:
+
+```yaml
+apiVersion: toolhive.stacklok.dev/v1alpha1
+kind: MCPRegistry
+metadata:
+  name: toolhive-community-registry
+  namespace: toolhive-system
+spec:
+  displayName: "ToolHive Community Registry"
+  format: toolhive
+  source:
+    type: configmap
+    configmap:
+      name: toolhive-registry-data
+      key: registry.json
+  syncPolicy:
+    type: automatic
+    interval: "1h"
+    retryPolicy:
+      maxAttempts: 3
+      backoffInterval: "30s"
+  filter:
+    tags:
+      include: ["database", "api"]
+      exclude: ["experimental"]
+```
+
+For detailed MCPRegistry configuration options and examples, see the [MCPRegistry documentation](../../examples/operator/mcp-registries/README.md).
 
 ### Creating an MCP Server
 
@@ -141,7 +185,25 @@ The `secrets` field has the following parameters:
 - `key`: The key in the secret itself (required)
 - `targetEnvName`: The environment variable to be used when setting up the secret in the MCP server (optional). If left unspecified, it defaults to the key.
 
-### Checking MCP Server Status
+### Checking Status
+
+#### MCP Registries
+
+To check the status of your MCP registries:
+
+```bash
+kubectl get mcpregistry -n toolhive-system
+```
+
+This will show the phase, source type, format, server count, and last sync time.
+
+For more details about a specific registry:
+
+```bash
+kubectl describe mcpregistry <name> -n toolhive-system
+```
+
+#### MCP Servers
 
 To check the status of your MCP servers:
 
@@ -158,6 +220,27 @@ kubectl describe mcpserver <name>
 ```
 
 ## Configuration Reference
+
+### MCPRegistry Spec
+
+| Field          | Description                                       | Required | Default   |
+|----------------|---------------------------------------------------|----------|-----------|
+| `displayName`  | Human-readable name for the registry             | No       | -         |
+| `format`       | Registry data format (toolhive, upstream)        | No       | toolhive  |
+| `source`       | Source configuration for registry data           | Yes      | -         |
+| `syncPolicy`   | Synchronization behavior and timing              | No       | manual    |
+| `filter`       | Include/exclude criteria for servers             | No       | -         |
+
+#### Source Types
+
+- **configmap**: References a ConfigMap containing registry data
+- **url**: HTTP/HTTPS endpoint serving registry JSON
+- **git**: Git repository source (planned)
+- **registry**: External registry reference (planned)
+
+#### Sync Intervals
+
+Use Go duration format: `"30s"`, `"5m"`, `"1h"`, `"24h"`, `"168h"` (1 week)
 
 ### MCPServer Spec
 
@@ -200,7 +283,8 @@ The ConfigMap should contain a JSON permission profile.
 
 ## Examples
 
-See the `examples/operator/mcp-servers/` directory for example MCPServer resources.
+- See the `examples/operator/mcp-registries/` directory for MCPRegistry examples and detailed configuration documentation
+- See the `examples/operator/mcp-servers/` directory for MCPServer examples
 
 ## Development
 
