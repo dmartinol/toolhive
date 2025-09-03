@@ -264,7 +264,9 @@ type MCPRegistrySyncPolicy struct {
 	// +optional
 	Type string `json:"type,omitempty"`
 
-	// Interval specifies the sync interval for automatic synchronization
+	// Interval specifies the sync interval for automatic synchronization using Go duration format.
+	// Valid units: s (seconds), m (minutes), h (hours)
+	// Examples: "3m", "1h", "24h" (1 day), "168h" (1 week), "720h" (1 month)
 	// Only used when Type is "automatic"
 	// +kubebuilder:default="1h"
 	// +optional

@@ -20,10 +20,12 @@ Represents an individual MCP server in Kubernetes. When you create an `MCPServer
 Manages MCP server registries for centralized server definitions. When you create an `MCPRegistry` resource, the operator automatically:
 
 1. Synchronizes registry data from various sources (ConfigMap, URL, Git)
-2. Converts between different registry formats (ToolHive and upstream)
+2. Converts between different registry formats (ToolHive and upstream) *(planned)*
 3. Stores processed registry data in ConfigMaps (configurable storage backends planned for future releases)
 4. Provides automatic or manual synchronization policies
 5. Enables GitOps workflows for registry management
+
+*Note: Automatic MCPServer deployment from registry entries is planned for future releases.*
 
 ```mermaid
 ---

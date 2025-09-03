@@ -13,7 +13,7 @@ spec:
       key: registry.json
   syncPolicy:
     type: automatic
-    interval: "1h"
+    interval: "3m"
     retryPolicy:
       maxAttempts: 3
       backoffInterval: "30s"
