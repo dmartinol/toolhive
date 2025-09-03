@@ -100,9 +100,9 @@ metadata:
   namespace: toolhive-system
 spec:
   displayName: "ToolHive Community Registry"
-  format: toolhive
   source:
     type: configmap
+    format: toolhive
     configmap:
       name: toolhive-registry-data
       key: registry.json
@@ -228,10 +228,20 @@ kubectl describe mcpserver <name>
 | Field          | Description                                       | Required | Default   |
 |----------------|---------------------------------------------------|----------|-----------|
 | `displayName`  | Human-readable name for the registry             | No       | -         |
-| `format`       | Registry data format (toolhive, upstream)        | No       | toolhive  |
 | `source`       | Source configuration for registry data           | Yes      | -         |
 | `syncPolicy`   | Synchronization behavior and timing              | No       | manual    |
 | `filter`       | Include/exclude criteria for servers             | No       | -         |
+
+#### Source Configuration
+
+| Field          | Description                                       | Required | Default   |
+|----------------|---------------------------------------------------|----------|-----------|
+| `type`         | Source type (configmap, url, git, registry)      | Yes      | -         |
+| `format`       | Registry data format (toolhive, upstream)        | No       | toolhive  |
+| `configmap`    | ConfigMap source configuration                    | No       | -         |
+| `url`          | URL source configuration (planned)               | No       | -         |
+| `git`          | Git source configuration (planned)               | No       | -         |
+| `registry`     | Registry source configuration (planned)          | No       | -         |
 
 #### Source Types
 

@@ -62,7 +62,7 @@ func (s *ConfigMapStorageManager) Store(ctx context.Context, registry *mcpv1alph
 			Labels:    s.getStorageLabels(registry),
 			Annotations: map[string]string{
 				"toolhive.stacklok.dev/registry-name":   registry.Name,
-				"toolhive.stacklok.dev/registry-format": registry.Spec.Format,
+				"toolhive.stacklok.dev/registry-format": registry.Spec.Source.Format,
 				"toolhive.stacklok.dev/storage-type":    "registry-data",
 			},
 		},

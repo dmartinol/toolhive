@@ -138,7 +138,7 @@ func (h *ConfigMapSourceHandler) Sync(ctx context.Context, registry *mcpv1alpha1
 	serverCount := int32(len(registryData.Servers))
 
 	// Apply format conversion if needed
-	targetFormat := registry.Spec.Format
+	targetFormat := registry.Spec.Source.Format
 	if targetFormat == "" {
 		targetFormat = mcpv1alpha1.RegistryFormatToolHive // Default format
 	}

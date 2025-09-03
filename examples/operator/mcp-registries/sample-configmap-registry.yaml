@@ -5,9 +5,9 @@ metadata:
   namespace: toolhive-system
 spec:
   displayName: "ToolHive Community Registry"
-  format: toolhive
   source:
     type: configmap
+    format: toolhive
     configmap:
       name: toolhive-registry-data
       key: registry.json

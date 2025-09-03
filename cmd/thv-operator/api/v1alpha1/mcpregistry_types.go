@@ -43,12 +43,6 @@ type MCPRegistrySpec struct {
 	// +optional
 	DisplayName string `json:"displayName,omitempty"`
 
-	// Format specifies the registry data format
-	// +kubebuilder:validation:Enum=toolhive;upstream
-	// +kubebuilder:default=toolhive
-	// +optional
-	Format string `json:"format,omitempty"`
-
 	// Source defines where to fetch registry data from
 	// +kubebuilder:validation:Required
 	Source MCPRegistrySource `json:"source"`
@@ -68,6 +62,12 @@ type MCPRegistrySource struct {
 	// +kubebuilder:validation:Enum=configmap;url;git;registry
 	// +kubebuilder:validation:Required
 	Type string `json:"type"`
+
+	// Format specifies the registry data format
+	// +kubebuilder:validation:Enum=toolhive;upstream
+	// +kubebuilder:default=toolhive
+	// +optional
+	Format string `json:"format,omitempty"`
 
 	// ConfigMap references a ConfigMap containing registry data
 	// Only used when Type is "configmap"
