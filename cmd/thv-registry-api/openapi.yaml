@@ -1,0 +1,378 @@
+openapi: 3.0.3
+info:
+  title: ToolHive Registry API
+  description: |
+    REST API for accessing ToolHive MCPRegistry data. Provides programmatic access to 
+    MCP server registry information with support for multiple registry formats.
+  version: 1.0.0
+  contact:
+    name: Stacklok
+    url: https://github.com/stacklok/toolhive
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+  - url: http://{service-name}.{namespace}.svc.cluster.local
+    description: Kubernetes cluster service
+    variables:
+      service-name:
+        default: registry-api
+        description: Kubernetes service name
+      namespace:
+        default: default
+        description: Kubernetes namespace
+
+paths:
+  /health:
+    get:
+      summary: Health check endpoint
+      description: Returns the health status of the Registry API service
+      operationId: healthCheck
+      tags:
+        - Health
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "OK"
+
+  /readiness:
+    get:
+      summary: Readiness check endpoint
+      description: Returns whether the service is ready to accept requests
+      operationId: readinessCheck
+      tags:
+        - Health
+      responses:
+        '200':
+          description: Service is ready
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "Ready"
+        '503':
+          description: Service is not ready
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "Not ready: cannot access registry"
+
+  /api/v1/registry/info:
+    get:
+      summary: Get registry information
+      description: Returns metadata about the MCPRegistry resource
+      operationId: getRegistryInfo
+      tags:
+        - Registry
+      responses:
+        '200':
+          description: Registry information retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegistryInfo'
+        '404':
+          description: Registry not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/registry/servers:
+    get:
+      summary: List all servers in the registry
+      description: Returns a list of all MCP servers in the registry
+      operationId: listServers
+      tags:
+        - Servers
+      parameters:
+        - name: format
+          in: query
+          description: Output format for the server data
+          required: false
+          schema:
+            type: string
+            enum: [toolhive, upstream]
+            default: toolhive
+          example: toolhive
+      responses:
+        '200':
+          description: Servers retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServerListResponse'
+        '400':
+          description: Invalid format parameter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/registry/servers/{name}:
+    get:
+      summary: Get a specific server
+      description: Returns detailed information about a specific MCP server
+      operationId: getServer
+      tags:
+        - Servers
+      parameters:
+        - name: name
+          in: path
+          description: Name of the MCP server
+          required: true
+          schema:
+            type: string
+          example: filesystem-inspector
+        - name: format
+          in: query
+          description: Output format for the server data
+          required: false
+          schema:
+            type: string
+            enum: [toolhive, upstream]
+            default: toolhive
+          example: toolhive
+      responses:
+        '200':
+          description: Server retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServerResponse'
+        '400':
+          description: Invalid format parameter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Server not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  schemas:
+    RegistryInfo:
+      type: object
+      description: Information about the MCPRegistry resource
+      properties:
+        name:
+          type: string
+          description: Name of the MCPRegistry resource
+          example: "production-registry"
+        displayName:
+          type: string
+          description: Human-readable display name
+          example: "Production MCP Server Registry"
+        format:
+          type: string
+          description: Default format of the registry
+          enum: [toolhive, upstream]
+          example: "toolhive"
+        source:
+          $ref: '#/components/schemas/RegistrySourceInfo'
+        status:
+          $ref: '#/components/schemas/RegistryStatusInfo'
+        syncPolicy:
+          $ref: '#/components/schemas/SyncPolicy'
+      required:
+        - name
+        - format
+        - source
+
+    RegistrySourceInfo:
+      type: object
+      description: Information about the registry data source
+      properties:
+        type:
+          type: string
+          description: Type of the registry source
+          enum: [configmap, url, git, registry]
+          example: "configmap"
+        format:
+          type: string
+          description: Format of the source data
+          enum: [toolhive, upstream]
+          example: "toolhive"
+      required:
+        - type
+        - format
+
+    RegistryStatusInfo:
+      type: object
+      description: Current status of the registry
+      properties:
+        phase:
+          type: string
+          description: Current phase of the registry
+          enum: [Pending, Syncing, Ready, Failed, Updating]
+          example: "Ready"
+        serverCount:
+          type: integer
+          description: Number of servers in the registry
+          format: int32
+          example: 25
+        lastSyncTime:
+          type: string
+          format: date-time
+          description: Timestamp of the last successful sync
+          example: "2024-01-15T10:30:00Z"
+        lastSyncHash:
+          type: string
+          description: Hash of the registry data from the last sync
+          example: "a1b2c3d4e5f6"
+        message:
+          type: string
+          description: Additional status information
+          example: "Successfully synced 25 servers"
+
+    SyncPolicy:
+      type: object
+      description: Synchronization policy for the registry
+      properties:
+        type:
+          type: string
+          description: Type of sync policy
+          enum: [manual, automatic]
+          example: "automatic"
+        interval:
+          type: string
+          description: Sync interval (Go duration format)
+          example: "1h"
+        retryPolicy:
+          $ref: '#/components/schemas/RetryPolicy'
+
+    RetryPolicy:
+      type: object
+      description: Retry policy configuration
+      properties:
+        maxAttempts:
+          type: integer
+          format: int32
+          description: Maximum number of retry attempts
+          example: 3
+        backoffInterval:
+          type: string
+          description: Base interval between retries
+          example: "30s"
+        backoffMultiplier:
+          type: string
+          description: Multiplier for exponential backoff
+          example: "2.0"
+
+    ServerListResponse:
+      type: object
+      description: Response containing a list of servers
+      properties:
+        servers:
+          type: object
+          description: Map of server names to server configurations
+          additionalProperties:
+            type: object
+            description: Server configuration object (format depends on 'format' parameter)
+          example:
+            filesystem-inspector:
+              name: "filesystem-inspector"
+              description: "MCP server for filesystem operations"
+              docker:
+                image: "mcp/filesystem:latest"
+        count:
+          type: integer
+          description: Total number of servers
+          example: 25
+        format:
+          type: string
+          description: Format of the server data
+          enum: [toolhive, upstream]
+          example: "toolhive"
+      required:
+        - servers
+        - count
+        - format
+
+    ServerResponse:
+      type: object
+      description: Response containing a specific server
+      properties:
+        name:
+          type: string
+          description: Name of the server
+          example: "filesystem-inspector"
+        server:
+          type: object
+          description: Server configuration object (format depends on 'format' parameter)
+          example:
+            name: "filesystem-inspector"
+            description: "MCP server for filesystem operations"
+            docker:
+              image: "mcp/filesystem:latest"
+        format:
+          type: string
+          description: Format of the server data
+          enum: [toolhive, upstream]
+          example: "toolhive"
+      required:
+        - name
+        - server
+        - format
+
+    ErrorResponse:
+      type: object
+      description: Error response
+      properties:
+        error:
+          type: string
+          description: HTTP status text
+          example: "Not Found"
+        message:
+          type: string
+          description: Detailed error message
+          example: "Server 'non-existent' not found"
+        code:
+          type: integer
+          description: HTTP status code
+          example: 404
+      required:
+        - error
+        - code
+
+tags:
+  - name: Health
+    description: Health and readiness endpoints
+  - name: Registry
+    description: Registry information endpoints
+  - name: Servers
+    description: Server management endpoints
+
+externalDocs:
+  description: ToolHive Documentation
+  url: https://github.com/stacklok/toolhive

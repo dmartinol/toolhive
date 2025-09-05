@@ -148,6 +148,28 @@ func (s *StatusManager) UpdateStorageReference(ctx context.Context, registry *mc
 	return nil
 }
 
+// UpdateAPIEndpoint updates the API endpoint URL in the status
+func (s *StatusManager) UpdateAPIEndpoint(ctx context.Context, registry *mcpv1alpha1.MCPRegistry, apiEndpoint string) error {
+	logger := log.FromContext(ctx).WithValues("registry", registry.Name)
+	
+	// Only update if changed
+	if registry.Status.ApiEndpoint == apiEndpoint {
+		return nil
+	}
+	
+	updated := registry.DeepCopy()
+	updated.Status.ApiEndpoint = apiEndpoint
+	
+	logger.Info("Updating API endpoint", "endpoint", apiEndpoint)
+	
+	if err := s.client.Status().Update(ctx, updated); err != nil {
+		return fmt.Errorf("failed to update API endpoint: %w", err)
+	}
+	
+	registry.Status = updated.Status
+	return nil
+}
+
 // updateConditionsForError updates conditions based on the type of error
 func (s *StatusManager) updateConditionsForError(registry *mcpv1alpha1.MCPRegistry, err error) {
 	// Check error type and update appropriate conditions

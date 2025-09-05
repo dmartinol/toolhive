@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -33,16 +34,18 @@ const (
 // MCPRegistryReconciler reconciles MCPRegistry objects
 type MCPRegistryReconciler struct {
 	client.Client
-	Scheme         *runtime.Scheme
-	sourceHandlers map[string]SourceHandler
-	storageManager StorageManager
-	statusManager  *StatusManager
+	Scheme          *runtime.Scheme
+	sourceHandlers  map[string]SourceHandler
+	storageManager  StorageManager
+	statusManager   *StatusManager
+	registryAPIManager *RegistryAPIManager
 }
 
 // NewMCPRegistryReconciler creates a new MCPRegistry reconciler
 func NewMCPRegistryReconciler(client client.Client, scheme *runtime.Scheme) *MCPRegistryReconciler {
 	statusManager := NewStatusManager(client)
 	storageManager := NewConfigMapStorageManager(client)
+	registryAPIManager := NewRegistryAPIManager(client, scheme)
 	
 	// Initialize source handlers
 	sourceHandlers := map[string]SourceHandler{
@@ -51,11 +54,12 @@ func NewMCPRegistryReconciler(client client.Client, scheme *runtime.Scheme) *MCP
 	}
 	
 	return &MCPRegistryReconciler{
-		Client:         client,
-		Scheme:         scheme,
-		sourceHandlers: sourceHandlers,
-		storageManager: storageManager,
-		statusManager:  statusManager,
+		Client:             client,
+		Scheme:             scheme,
+		sourceHandlers:     sourceHandlers,
+		storageManager:     storageManager,
+		statusManager:      statusManager,
+		registryAPIManager: registryAPIManager,
 	}
 }
 
@@ -181,6 +185,19 @@ func (r *MCPRegistryReconciler) syncRegistry(ctx context.Context, registry *mcpv
 		return ctrl.Result{}, err
 	}
 
+	// Deploy Registry API service
+	apiEndpoint, err := r.registryAPIManager.ReconcileRegistryAPI(ctx, registry)
+	if err != nil {
+		logger.Error(err, "Failed to reconcile Registry API")
+		// Don't fail the entire sync for API deployment issues
+		// The registry data is still available, just not via the API
+	} else {
+		// Update the API endpoint in the status
+		if err := r.statusManager.UpdateAPIEndpoint(ctx, registry, apiEndpoint); err != nil {
+			logger.Error(err, "Failed to update API endpoint in status")
+		}
+	}
+
 	logger.Info("Sync operation completed successfully", "servers", result.ServerCount, "hash", result.Hash[:8])
 	
 	return r.scheduleNextSync(registry), nil
@@ -276,6 +293,13 @@ func (r *MCPRegistryReconciler) handleDeletion(ctx context.Context, registry *mc
 	logger := log.FromContext(ctx).WithValues("registry", registry.Name)
 	
 	if controllerutil.ContainsFinalizer(registry, MCPRegistryFinalizer) {
+		// Cleanup Registry API resources
+		logger.Info("Cleaning up Registry API resources")
+		if err := r.registryAPIManager.DeleteRegistryAPI(ctx, registry); err != nil {
+			logger.Error(err, "Failed to cleanup Registry API resources")
+			return ctrl.Result{}, err
+		}
+		
 		// Cleanup storage
 		logger.Info("Cleaning up registry storage")
 		if err := r.storageManager.Delete(ctx, registry); err != nil {
@@ -335,6 +359,8 @@ func (r *MCPRegistryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&mcpv1alpha1.MCPRegistry{}).
 		Owns(&corev1.ConfigMap{}). // Watch owned ConfigMaps (storage)
+		Owns(&appsv1.Deployment{}). // Watch owned Deployments (Registry API)
+		Owns(&corev1.Service{}). // Watch owned Services (Registry API)
 		Watches(
 			&corev1.ConfigMap{}, // Watch referenced ConfigMaps (sources)
 			handler.EnqueueRequestsFromMapFunc(r.findMCPRegistriesForConfigMap),

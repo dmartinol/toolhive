@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: mcp-registry
+    component: mcp-registry
+  name: mcp-registry
+  namespace: toolhive-system
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: mcp-registry
+      component: mcp-registry
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        app: mcp-registry
+        component: mcp-registry
+    spec:
+      containers:
+        - env:
+            - name: MCP_REGISTRY_DATABASE_TYPE
+              value: mongodb
+            - name: MCP_REGISTRY_DATABASE_URL
+              value: mongodb://example-registry-mongodb:27017
+            - name: MCP_REGISTRY_DATABASE_NAME
+              value: mcp-registry
+            - name: MCP_REGISTRY_COLLECTION_NAME
+              value: servers_v2
+            - name: MCP_REGISTRY_LOG_LEVEL
+              value: debug
+            - name: MCP_REGISTRY_SEED_IMPORT
+              value: 'false'
+          image: >-
+            quay.io/ecosystem-appeng/mcp-registry@sha256:244dc363914a30a9a24fd7ea6a0e709bb885b806ca401354450b479e13e1a16b
+          imagePullPolicy: IfNotPresent
+          name: mcp-registry
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+              name: registry
+        - env:
+            - name: API_BASE_URL
+              value: 'http://localhost:8080/v0'
+            - name: OPENAPI_SPEC_PATH
+              value: '/data/registry-openapi.yaml'
+            - name: OPENAPI_SPEC_FROM_STDIN
+              value: 'false'
+            - name: TRANSPORT_TYPE
+              value: 'http'
+            - name: HTTP_PORT
+              value: '9090'
+          image: >-
+            quay.io/dmartino/mcp-openapi-server:0.1
+          imagePullPolicy: IfNotPresent
+          name: mcp-openapi-server
+          ports:
+            - containerPort: 9090
+              protocol: TCP
+              name: mcp
+          volumeMounts:
+            - name: openapi-spec
+              mountPath: /data
+      volumes:
+        - name: openapi-spec
+          configMap:
+            name: registry-openapi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: mcp-registry
+    component: mcp-registry
+  name: mcp-registry
+  namespace: toolhive-system
+spec:
+  ports:
+  - name: registry
+    port: 8080
+    protocol: TCP
+    targetPort: 8080
+  - name: mcp
+    port: 9090
+    protocol: TCP
+    targetPort: 9090
+  selector:
+    app: mcp-registry
+    component: mcp-registry

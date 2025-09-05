@@ -234,6 +234,21 @@ This section provides a phased delivery approach for Phase 1, organized by prior
    - **Dependencies:** Task 2.2, Task 2.1 (FormatConverter)
    - **Deliverable:** Independent Registry API service with container image
    - **Estimate:** 4-5 days
+   - **Claude Code Estimate:** 6-8 hours
+   - **Implementation Tasks:**
+     1. Create cmd/thv-registry-api Go package structure
+     2. Create pkg/registryapi package with HTTP handlers
+     3. Implement /api/v1/registry/info endpoint
+     4. Implement /api/v1/registry/servers endpoint with format support
+     5. Implement /api/v1/registry/servers/{name} endpoint
+     6. Integrate FormatConverter for query parameter format conversion
+     7. Add Kubernetes client integration to read MCPRegistry and ConfigMap data
+     8. Update MCPRegistry controller to deploy Registry API service
+     9. Create Deployment and Service manifests for Registry API
+     10. Add Registry API URL to MCPRegistry status
+     11. Create Dockerfile for registry API container image
+     12. Add OpenAPI documentation for registry endpoints
+     13. Write unit tests for all API handlers
 
 ### Sprint 3: CLI and Integration (Weeks 5-6)
 **Priority: High - User interface and integration**
@@ -245,6 +260,7 @@ This section provides a phased delivery approach for Phase 1, organized by prior
    - **Dependencies:** Task 2.2
    - **Deliverable:** Basic CLI commands in `cmd/thv/app/`
    - **Estimate:** 3-4 days
+   - **Claude Code Estimate:** 3-4 hours
 
 8. **Task 3.2: Registry Management CLI** ⭐ **MEDIUM-HIGH PRIORITY**
    - Implement `thv registry add` command
@@ -253,6 +269,7 @@ This section provides a phased delivery approach for Phase 1, organized by prior
    - **Dependencies:** Task 3.1 (Task 2.3 moved to Phase 2)
    - **Deliverable:** Complete CLI command set
    - **Estimate:** 3-4 days
+   - **Claude Code Estimate:** 4-6 hours
 
 9. **Task 3.3: REMOVED** ❌ **INVALID REQUIREMENT**
    - ❌ Automatic MCPServer creation is not intended
@@ -270,6 +287,7 @@ This section provides a phased delivery approach for Phase 1, organized by prior
     - **Dependencies:** Tasks 2.1, 2.2, 3.1
     - **Deliverable:** Comprehensive unit test suite
     - **Estimate:** 4-5 days
+    - **Claude Code Estimate:** 6-8 hours
 
 11. **Task 4.2: Integration Tests** ⭐ **MEDIUM-HIGH PRIORITY**
     - Write controller integration tests with test environment
@@ -278,6 +296,7 @@ This section provides a phased delivery approach for Phase 1, organized by prior
     - **Dependencies:** Task 4.1, Task 3.3
     - **Deliverable:** Integration test suite
     - **Estimate:** 3-4 days
+    - **Claude Code Estimate:** 4-6 hours
 
 12. **Task 4.3: Status Tracking and Error Handling** ⭐ **MEDIUM PRIORITY**
     - Implement comprehensive status reporting
@@ -286,6 +305,7 @@ This section provides a phased delivery approach for Phase 1, organized by prior
     - **Dependencies:** Task 3.3
     - **Deliverable:** Robust status and error handling
     - **Estimate:** 2-3 days
+    - **Claude Code Estimate:** 2-3 hours
 
 ### Sprint 5: Documentation and Deployment (Week 9)
 **Priority: Medium - Documentation and deployment readiness**
@@ -297,6 +317,7 @@ This section provides a phased delivery approach for Phase 1, organized by prior
     - **Dependencies:** Task 4.2
     - **Deliverable:** Complete API documentation
     - **Estimate:** 2-3 days
+    - **Claude Code Estimate:** 2-3 hours
 
 14. **Task 5.2: User Documentation** ⭐ **MEDIUM PRIORITY**
     - Write user guides and tutorials
@@ -305,6 +326,7 @@ This section provides a phased delivery approach for Phase 1, organized by prior
     - **Dependencies:** Task 5.1
     - **Deliverable:** User-facing documentation
     - **Estimate:** 2-3 days
+    - **Claude Code Estimate:** 3-4 hours
 
 15. **Task 5.3: Deployment Testing** ⭐ **MEDIUM PRIORITY**
     - Test operator deployment with new CRDs
@@ -313,6 +335,7 @@ This section provides a phased delivery approach for Phase 1, organized by prior
     - **Dependencies:** Task 4.2
     - **Deliverable:** Deployment validation
     - **Estimate:** 1-2 days
+    - **Claude Code Estimate:** 1-2 hours
 
 ### Risk Mitigation Tasks (Parallel to other sprints)
 
@@ -323,6 +346,7 @@ This section provides a phased delivery approach for Phase 1, organized by prior
     - **Dependencies:** Task 2.2
     - **Deliverable:** Backup and rollback tools
     - **Estimate:** 2-3 days
+    - **Claude Code Estimate:** 3-4 hours
 
 17. **Task R.2: Performance Optimization** ⭐ **LOW PRIORITY**
     - Optimize controller reconcile loops
@@ -331,11 +355,13 @@ This section provides a phased delivery approach for Phase 1, organized by prior
     - **Dependencies:** Task 4.1
     - **Deliverable:** Performance improvements
     - **Estimate:** 2-3 days
+    - **Claude Code Estimate:** 2-4 hours
 
 ### Critical Path Analysis
 
 **Critical Path:** Tasks 1.1 → 1.2 → 1.3 → 2.2 → 2.4 → 3.1 → 3.2 → 4.1 → 4.2
 **Total Estimated Duration:** 7-9 weeks
+**Claude Code Total Duration:** 35-50 hours (1-1.5 weeks)
 **Key Milestones:**
 - Week 2: Basic CRD and controller foundation
 - Week 4: Core registry functionality working

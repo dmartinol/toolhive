@@ -356,6 +356,10 @@ type MCPRegistryStatus struct {
 	// StorageRef references the storage location for the registry data
 	// +optional
 	StorageRef *StorageReference `json:"storageRef,omitempty"`
+
+	// ApiEndpoint is the URL of the Registry API service for this registry
+	// +optional
+	ApiEndpoint string `json:"apiEndpoint,omitempty"`
 }
 
 // MCPRegistryPhase represents the lifecycle phase of an MCPRegistry
