@@ -20,6 +20,13 @@ import (
 	transporttypes "github.com/stacklok/toolhive/pkg/transport/types"
 )
 
+const (
+	testImage               = "test-image:latest"
+	stdioTransport          = "stdio"
+	sseProxyMode            = "sse"
+	streamableHTTPProxyMode = "streamable-http"
+)
+
 func createRunConfigTestScheme() *runtime.Scheme {
 	testScheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(testScheme)
@@ -35,7 +42,7 @@ func createTestMCPServerWithConfig(name, namespace, image string, envVars []mcpv
 		},
 		Spec: mcpv1alpha1.MCPServerSpec{
 			Image:     image,
-			Transport: "stdio",
+			Transport: stdioTransport,
 			Port:      8080,
 			Env:       envVars,
 		},
@@ -48,7 +55,7 @@ func TestCreateRunConfigFromMCPServer(t *testing.T) {
 	tests := []struct {
 		name      string
 		mcpServer *mcpv1alpha1.MCPServer
-		expected  func(config *runner.RunConfig) bool
+		expected  func(t *testing.T, config *runner.RunConfig)
 	}{
 		{
 			name: "basic conversion",
@@ -58,16 +65,17 @@ func TestCreateRunConfigFromMCPServer(t *testing.T) {
 					Namespace: "test-ns",
 				},
 				Spec: mcpv1alpha1.MCPServerSpec{
-					Image:     "test-image:latest",
-					Transport: "stdio",
+					Image:     testImage,
+					Transport: stdioTransport,
 					Port:      8080,
 				},
 			},
-			expected: func(config *runner.RunConfig) bool {
-				return config.Name == "test-server" &&
-					config.Image == "test-image:latest" &&
-					config.Transport == "stdio" &&
-					config.Port == 8080
+			//nolint:thelper // We want to see the error at the specific line
+			expected: func(t *testing.T, config *runner.RunConfig) {
+				assert.Equal(t, "test-server", config.Name)
+				assert.Equal(t, "test-image:latest", config.Image)
+				assert.Equal(t, transporttypes.TransportTypeStdio, config.Transport)
+				assert.Equal(t, 8080, config.Port)
 			},
 		},
 		{
@@ -87,11 +95,14 @@ func TestCreateRunConfigFromMCPServer(t *testing.T) {
 					},
 				},
 			},
-			expected: func(config *runner.RunConfig) bool {
-				return config.Name == "env-server" &&
-					len(config.EnvVars) == 2 &&
-					config.EnvVars["VAR1"] == "value1" &&
-					config.EnvVars["VAR2"] == "value2"
+			//nolint:thelper // We want to see the error at the specific line
+			expected: func(t *testing.T, config *runner.RunConfig) {
+				assert.Equal(t, "env-server", config.Name)
+				// Check that user-provided env vars are present
+				assert.Equal(t, "value1", config.EnvVars["VAR1"])
+				assert.Equal(t, "value2", config.EnvVars["VAR2"])
+				// Check that transport env var is set
+				assert.Equal(t, "sse", config.EnvVars["MCP_TRANSPORT"])
 			},
 		},
 		{
@@ -111,11 +122,12 @@ func TestCreateRunConfigFromMCPServer(t *testing.T) {
 					},
 				},
 			},
-			expected: func(config *runner.RunConfig) bool {
-				return config.Name == "vol-server" &&
-					len(config.Volumes) == 2 &&
-					config.Volumes[0] == "/host/path1:/mount/path1" &&
-					config.Volumes[1] == "/host/path2:/mount/path2:ro"
+			//nolint:thelper // We want to see the error at the specific line
+			expected: func(t *testing.T, config *runner.RunConfig) {
+				assert.Equal(t, "vol-server", config.Name)
+				assert.Len(t, config.Volumes, 2)
+				assert.Equal(t, "/host/path1:/mount/path1", config.Volumes[0])
+				assert.Equal(t, "/host/path2:/mount/path2:ro", config.Volumes[1])
 			},
 		},
 		{
@@ -135,11 +147,58 @@ func TestCreateRunConfigFromMCPServer(t *testing.T) {
 					},
 				},
 			},
-			expected: func(config *runner.RunConfig) bool {
-				return config.Name == "secret-server" &&
-					len(config.Secrets) == 2 &&
-					config.Secrets[0] == "secret1,target=TARGET1" &&
-					config.Secrets[1] == "secret2,target=key2"
+			//nolint:thelper // We want to see the error at the specific line
+			expected: func(t *testing.T, config *runner.RunConfig) {
+				assert.Equal(t, "secret-server", config.Name)
+				assert.Len(t, config.Secrets, 2)
+				assert.Equal(t, "secret1,target=TARGET1", config.Secrets[0])
+				assert.Equal(t, "secret2,target=key2", config.Secrets[1])
+			},
+		},
+		{
+			name: "proxy mode specified",
+			mcpServer: &mcpv1alpha1.MCPServer{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "proxy-mode-server",
+					Namespace: "test-ns",
+				},
+				Spec: mcpv1alpha1.MCPServerSpec{
+					Image:     testImage,
+					Transport: stdioTransport,
+					Port:      8080,
+					ProxyMode: streamableHTTPProxyMode,
+				},
+			},
+			//nolint:thelper // We want to see the error at the specific line
+			expected: func(t *testing.T, config *runner.RunConfig) {
+				assert.Equal(t, "proxy-mode-server", config.Name)
+				assert.Equal(t, testImage, config.Image)
+				assert.Equal(t, transporttypes.TransportTypeStdio, config.Transport)
+				assert.Equal(t, 8080, config.Port)
+				assert.Equal(t, transporttypes.ProxyModeStreamableHTTP, config.ProxyMode)
+			},
+		},
+		{
+			name: "proxy mode defaults to sse when not specified",
+			mcpServer: &mcpv1alpha1.MCPServer{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "default-proxy-mode-server",
+					Namespace: "test-ns",
+				},
+				Spec: mcpv1alpha1.MCPServerSpec{
+					Image:     testImage,
+					Transport: stdioTransport,
+					Port:      8080,
+					// ProxyMode not specified
+				},
+			},
+			//nolint:thelper // We want to see the error at the specific line
+			expected: func(t *testing.T, config *runner.RunConfig) {
+				assert.Equal(t, "default-proxy-mode-server", config.Name)
+				assert.Equal(t, testImage, config.Image)
+				assert.Equal(t, transporttypes.TransportTypeStdio, config.Transport)
+				assert.Equal(t, 8080, config.Port)
+				assert.Equal(t, transporttypes.ProxyModeSSE, config.ProxyMode, "Should default to sse")
 			},
 		},
 		{
@@ -154,6 +213,7 @@ func TestCreateRunConfigFromMCPServer(t *testing.T) {
 					Transport:   "streamable-http",
 					Port:        9090,
 					TargetPort:  8080,
+					ProxyMode:   "streamable-http",
 					Args:        []string{"--comprehensive", "--test"},
 					ToolsFilter: []string{"tool1", "tool2"},
 					Env: []mcpv1alpha1.EnvVar{
@@ -171,24 +231,26 @@ func TestCreateRunConfigFromMCPServer(t *testing.T) {
 					},
 				},
 			},
-			expected: func(config *runner.RunConfig) bool {
-				return config.Name == "comprehensive-server" &&
-					config.Image == "comprehensive:latest" &&
-					config.Transport == "streamable-http" &&
-					config.Port == 9090 &&
-					config.TargetPort == 8080 &&
-					len(config.CmdArgs) == 2 &&
-					config.CmdArgs[0] == "--comprehensive" &&
-					len(config.ToolsFilter) == 2 &&
-					len(config.EnvVars) == 3 &&
-					config.EnvVars["ENV1"] == "value1" &&
-					config.EnvVars["EMPTY_VALUE"] == "" &&
-					len(config.Volumes) == 2 &&
-					config.Volumes[0] == "/host/path1:/mount/path1" &&
-					config.Volumes[1] == "/host/path2:/mount/path2:ro" &&
-					len(config.Secrets) == 2 &&
-					config.Secrets[0] == "secret1,target=CUSTOM_TARGET" &&
-					config.Secrets[1] == "secret2,target=key2"
+			//nolint:thelper // We want to see the error at the specific line
+			expected: func(t *testing.T, config *runner.RunConfig) {
+				assert.Equal(t, "comprehensive-server", config.Name)
+				assert.Equal(t, "comprehensive:latest", config.Image)
+				assert.Equal(t, transporttypes.TransportTypeStreamableHTTP, config.Transport)
+				assert.Equal(t, 9090, config.Port)
+				assert.Equal(t, 8080, config.TargetPort)
+				assert.Equal(t, transporttypes.ProxyModeStreamableHTTP, config.ProxyMode)
+				assert.Equal(t, []string{"--comprehensive", "--test"}, config.CmdArgs)
+				assert.Equal(t, []string{"tool1", "tool2"}, config.ToolsFilter)
+				assert.Len(t, config.EnvVars, 6) // NOTE: we should probably drop this
+				assert.Equal(t, "value1", config.EnvVars["ENV1"])
+				assert.Equal(t, "value2", config.EnvVars["ENV2"])
+				assert.Equal(t, "", config.EnvVars["EMPTY_VALUE"])
+				assert.Len(t, config.Volumes, 2)
+				assert.Equal(t, "/host/path1:/mount/path1", config.Volumes[0])
+				assert.Equal(t, "/host/path2:/mount/path2:ro", config.Volumes[1])
+				assert.Len(t, config.Secrets, 2)
+				assert.Equal(t, "secret1,target=CUSTOM_TARGET", config.Secrets[0])
+				assert.Equal(t, "secret2,target=key2", config.Secrets[1])
 			},
 		},
 		{
@@ -209,14 +271,15 @@ func TestCreateRunConfigFromMCPServer(t *testing.T) {
 					Secrets:     nil,                    // Nil slice
 				},
 			},
-			expected: func(config *runner.RunConfig) bool {
-				return config.Name == "edge-server" &&
-					config.Image == "edge:latest" &&
-					len(config.CmdArgs) == 0 &&
-					len(config.ToolsFilter) == 0 &&
-					len(config.EnvVars) == 0 &&
-					len(config.Volumes) == 0 &&
-					len(config.Secrets) == 0
+			//nolint:thelper // We want to see the error at the specific line
+			expected: func(t *testing.T, config *runner.RunConfig) {
+				assert.Equal(t, "edge-server", config.Name)
+				assert.Equal(t, "edge:latest", config.Image)
+				assert.Len(t, config.CmdArgs, 0)
+				assert.Len(t, config.ToolsFilter, 0)
+				assert.Len(t, config.EnvVars, 1)
+				assert.Len(t, config.Volumes, 0)
+				assert.Len(t, config.Secrets, 0)
 			},
 		},
 	}
@@ -229,7 +292,7 @@ func TestCreateRunConfigFromMCPServer(t *testing.T) {
 			require.NoError(t, err)
 			assert.NotNil(t, result)
 			assert.Equal(t, runner.CurrentSchemaVersion, result.SchemaVersion)
-			assert.True(t, tt.expected(result))
+			tt.expected(t, result)
 		})
 	}
 }
@@ -351,7 +414,7 @@ func TestDeterministicConfigMapGeneration(t *testing.T) {
 	assert.Equal(t, []string{"tool3", "tool1", "tool2"}, baseRunConfig.ToolsFilter)
 
 	// Verify environment variables
-	assert.Len(t, baseRunConfig.EnvVars, 4)
+	assert.Len(t, baseRunConfig.EnvVars, 7) // NOTE: we should probably drop this
 	assert.Equal(t, "value_a", baseRunConfig.EnvVars["VAR_A"])
 	assert.Equal(t, "value_b", baseRunConfig.EnvVars["VAR_B"])
 	assert.Equal(t, "value_c", baseRunConfig.EnvVars["VAR_C"])
@@ -883,7 +946,7 @@ func TestEnsureRunConfigConfigMapCompleteFlow(t *testing.T) {
 	err = json.Unmarshal([]byte(configMap1.Data["runconfig.json"]), &initialRunConfig)
 	require.NoError(t, err)
 	assert.Equal(t, "test:v1", initialRunConfig.Image)
-	assert.Len(t, initialRunConfig.EnvVars, 1)
+	assert.Len(t, initialRunConfig.EnvVars, 2) // NOTE: we should probably drop this
 	assert.Equal(t, "value1", initialRunConfig.EnvVars["ENV1"])
 
 	// Step 2: Update MCPServer with new environment variable
@@ -915,7 +978,7 @@ func TestEnsureRunConfigConfigMapCompleteFlow(t *testing.T) {
 	err = json.Unmarshal([]byte(configMap2.Data["runconfig.json"]), &updatedRunConfig)
 	require.NoError(t, err)
 	assert.Equal(t, "test:v2", updatedRunConfig.Image)
-	assert.Len(t, updatedRunConfig.EnvVars, 2)
+	assert.Len(t, updatedRunConfig.EnvVars, 3) // NOTE: we should probably drop this
 	assert.Equal(t, "value1", updatedRunConfig.EnvVars["ENV1"])
 	assert.Equal(t, "value2", updatedRunConfig.EnvVars["ENV2"])
 
@@ -1022,6 +1085,20 @@ func TestMCPServerModificationScenarios(t *testing.T) {
 			},
 			expectedChanges: map[string]interface{}{
 				"Secrets": []string{"secret1,target=CUSTOM_ENV1", "secret2,target=key2"},
+			},
+		},
+		{
+			name: "Proxy mode change",
+			initialServer: func() *mcpv1alpha1.MCPServer {
+				server := createTestMCPServerWithConfig("proxy-test", "default", "test:v1", nil)
+				server.Spec.ProxyMode = sseProxyMode
+				return server
+			},
+			modifyServer: func(server *mcpv1alpha1.MCPServer) {
+				server.Spec.ProxyMode = streamableHTTPProxyMode
+			},
+			expectedChanges: map[string]interface{}{
+				"ProxyMode": transporttypes.ProxyModeStreamableHTTP,
 			},
 		},
 	}

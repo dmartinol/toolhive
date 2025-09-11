@@ -216,25 +216,52 @@ func (*MCPServerReconciler) createRunConfigFromMCPServer(m *mcpv1alpha1.MCPServe
 		}
 	}
 
-	// Use the RunConfigBuilder for operator context with full builder pattern
-	config, err := runner.NewOperatorRunConfigBuilder().
-		WithName(m.Name).
-		WithImage(m.Spec.Image).
-		WithCmdArgs(m.Spec.Args).
-		WithTransportAndPorts(m.Spec.Transport, port, int(m.Spec.TargetPort)).
-		WithHost(proxyHost).
-		WithToolsFilter(m.Spec.ToolsFilter).
-		WithEnvVars(envVars).
-		WithVolumes(volumes).
-		WithSecrets(secrets).
-		WithK8sPodPatch(k8sPodPatch).
-		BuildForOperator()
-
-	if err != nil {
-		return nil, err
+	proxyMode := m.Spec.ProxyMode
+	if proxyMode == "" {
+		proxyMode = "sse" // Default to SSE for backward compatibility
 	}
 
-	return config, nil
+	options := []runner.RunConfigBuilderOption{
+		runner.WithName(m.Name),
+		runner.WithImage(m.Spec.Image),
+		runner.WithCmdArgs(m.Spec.Args),
+		runner.WithTransportAndPorts(m.Spec.Transport, port, int(m.Spec.TargetPort)),
+		runner.WithProxyMode(transporttypes.ProxyMode(proxyMode)),
+		runner.WithHost(proxyHost),
+		runner.WithToolsFilter(m.Spec.ToolsFilter),
+		runner.WithEnvVars(envVars),
+		runner.WithVolumes(volumes),
+		runner.WithSecrets(secrets),
+		runner.WithK8sPodPatch(k8sPodPatch),
+	}
+
+	// Add permission profile if specified
+	if m.Spec.PermissionProfile != nil {
+		switch m.Spec.PermissionProfile.Type {
+		case mcpv1alpha1.PermissionProfileTypeBuiltin:
+			options = append(options,
+				runner.WithPermissionProfileNameOrPath(
+					m.Spec.PermissionProfile.Name,
+				),
+			)
+		case mcpv1alpha1.PermissionProfileTypeConfigMap:
+			// For ConfigMap-based permission profiles, we store the path
+			options = append(options,
+				runner.WithPermissionProfileNameOrPath(
+					fmt.Sprintf("/etc/toolhive/profiles/%s", m.Spec.PermissionProfile.Key),
+				),
+			)
+		}
+	}
+
+	// Use the RunConfigBuilder for operator context with full builder pattern
+	return runner.NewOperatorRunConfigBuilder(
+		context.Background(),
+		nil,
+		envVars,
+		nil,
+		options...,
+	)
 }
 
 // labelsForRunConfig returns labels for run config ConfigMap
