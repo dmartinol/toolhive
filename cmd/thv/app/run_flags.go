@@ -9,6 +9,7 @@ import (
 
 	"github.com/stacklok/toolhive/pkg/auth"
 	"github.com/stacklok/toolhive/pkg/authz"
+	"github.com/stacklok/toolhive/pkg/cli"
 	cfg "github.com/stacklok/toolhive/pkg/config"
 	"github.com/stacklok/toolhive/pkg/container"
 	"github.com/stacklok/toolhive/pkg/container/runtime"
@@ -89,6 +90,8 @@ type RunFlags struct {
 
 	// Tools filter
 	ToolsFilter []string
+	// Tools override file
+	ToolsOverride string
 
 	// Configuration import
 	FromConfig string
@@ -200,6 +203,12 @@ func AddRunFlags(cmd *cobra.Command, config *RunFlags) {
 		nil,
 		"Filter MCP server tools (comma-separated list of tool names)",
 	)
+	cmd.Flags().StringVar(
+		&config.ToolsOverride,
+		"tools-override",
+		"",
+		"Path to a JSON file containing overrides for MCP server tools names and descriptions",
+	)
 	cmd.Flags().StringVar(&config.FromConfig, "from-config", "", "Load configuration from exported file")
 
 	// Environment file processing flags
@@ -243,7 +252,6 @@ func BuildRunnerConfig(
 		return nil, err
 	}
 
-	// If --remote flag is provided, use it as the serverOrImage
 	if runFlags.RemoteURL != "" {
 		return buildRunnerConfig(ctx, runFlags, cmdArgs, debugMode, validatedHost, rt, runFlags.RemoteURL, nil,
 			nil, envVarValidator, oidcConfig, telemetryConfig)
@@ -294,12 +302,14 @@ func setupOIDCConfiguration(cmd *cobra.Command, runFlags *RunFlags) (*auth.Token
 func setupTelemetryConfiguration(cmd *cobra.Command, runFlags *RunFlags) *telemetry.Config {
 	configProvider := cfg.NewDefaultProvider()
 	config := configProvider.GetConfig()
-	finalOtelEndpoint, finalOtelSamplingRate, finalOtelEnvironmentVariables := getTelemetryFromFlags(cmd, config,
-		runFlags.OtelEndpoint, runFlags.OtelSamplingRate, runFlags.OtelEnvironmentVariables)
+	finalOtelEndpoint, finalOtelSamplingRate, finalOtelEnvironmentVariables, finalOtelInsecure,
+		finalOtelEnablePrometheusMetricsPath := getTelemetryFromFlags(cmd, config, runFlags.OtelEndpoint,
+		runFlags.OtelSamplingRate, runFlags.OtelEnvironmentVariables, runFlags.OtelInsecure,
+		runFlags.OtelEnablePrometheusMetricsPath)
 
-	return createTelemetryConfig(finalOtelEndpoint, runFlags.OtelEnablePrometheusMetricsPath,
+	return createTelemetryConfig(finalOtelEndpoint, finalOtelEnablePrometheusMetricsPath,
 		runFlags.OtelServiceName, runFlags.OtelTracingEnabled, runFlags.OtelMetricsEnabled, finalOtelSamplingRate,
-		runFlags.OtelHeaders, runFlags.OtelInsecure, finalOtelEnvironmentVariables)
+		runFlags.OtelHeaders, finalOtelInsecure, finalOtelEnvironmentVariables)
 }
 
 // setupRuntimeAndValidation creates container runtime and selects environment variable validator
@@ -420,28 +430,39 @@ func buildRunnerConfig(
 		}),
 	}
 
+	var toolsOverride map[string]runner.ToolOverride
+	if runFlags.ToolsOverride != "" {
+		loadedToolsOverride, err := cli.LoadToolsOverride(runFlags.ToolsOverride)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load tools override: %v", err)
+		}
+		toolsOverride = *loadedToolsOverride
+	}
+
+	opts = append(opts, runner.WithToolsOverride(toolsOverride))
 	// Configure middleware from flags
-	opts = append(opts, runner.WithMiddlewareFromFlags(
-		oidcConfig,
-		runFlags.ToolsFilter,
-		nil,
-		telemetryConfig,
-		runFlags.AuthzConfig,
-		runFlags.EnableAudit,
-		runFlags.AuditConfig,
-		runFlags.Name,
-		runFlags.Transport,
-	))
+	opts = append(
+		opts,
+		runner.WithMiddlewareFromFlags(
+			oidcConfig,
+			runFlags.ToolsFilter,
+			toolsOverride,
+			telemetryConfig,
+			runFlags.AuthzConfig,
+			runFlags.EnableAudit,
+			runFlags.AuditConfig,
+			runFlags.Name,
+			runFlags.Transport,
+		),
+	)
 
 	if remoteServerMetadata, ok := serverMetadata.(*registry.RemoteServerMetadata); ok {
-		if remoteAuthConfig := getRemoteAuthFromRemoteServerMetadata(remoteServerMetadata); remoteAuthConfig != nil {
-			opts = append(opts, runner.WithRemoteAuth(remoteAuthConfig))
-		}
+		remoteAuthConfig := getRemoteAuthFromRemoteServerMetadata(remoteServerMetadata)
+		opts = append(opts, runner.WithRemoteAuth(remoteAuthConfig), runner.WithRemoteURL(remoteServerMetadata.URL))
 	}
 	if runFlags.RemoteURL != "" {
-		if remoteAuthConfig := getRemoteAuthFromRunFlags(runFlags); remoteAuthConfig != nil {
-			opts = append(opts, runner.WithRemoteAuth(remoteAuthConfig))
-		}
+		remoteAuthConfig := getRemoteAuthFromRunFlags(runFlags)
+		opts = append(opts, runner.WithRemoteAuth(remoteAuthConfig))
 	}
 
 	// Load authz config if path is provided
@@ -506,6 +527,9 @@ func getRemoteAuthFromRemoteServerMetadata(remoteServerMetadata *registry.Remote
 	}
 
 	if remoteServerMetadata.OAuthConfig != nil {
+		if remoteServerMetadata.OAuthConfig.CallbackPort == 0 {
+			remoteServerMetadata.OAuthConfig.CallbackPort = runner.DefaultCallbackPort
+		}
 		return &runner.RemoteAuthConfig{
 			ClientID:     runFlags.RemoteAuthFlags.RemoteAuthClientID,
 			ClientSecret: runFlags.RemoteAuthFlags.RemoteAuthClientSecret,
@@ -554,7 +578,8 @@ func getOidcFromFlags(cmd *cobra.Command) (string, string, string, string, strin
 
 // getTelemetryFromFlags extracts telemetry configuration from command flags
 func getTelemetryFromFlags(cmd *cobra.Command, config *cfg.Config, otelEndpoint string, otelSamplingRate float64,
-	otelEnvironmentVariables []string) (string, float64, []string) {
+	otelEnvironmentVariables []string, otelInsecure bool, otelEnablePrometheusMetricsPath bool) (
+	string, float64, []string, bool, bool) {
 	// Use config values as fallbacks for OTEL flags if not explicitly set
 	finalOtelEndpoint := otelEndpoint
 	if !cmd.Flags().Changed("otel-endpoint") && config.OTEL.Endpoint != "" {
@@ -571,7 +596,18 @@ func getTelemetryFromFlags(cmd *cobra.Command, config *cfg.Config, otelEndpoint 
 		finalOtelEnvironmentVariables = config.OTEL.EnvVars
 	}
 
-	return finalOtelEndpoint, finalOtelSamplingRate, finalOtelEnvironmentVariables
+	finalOtelInsecure := otelInsecure
+	if !cmd.Flags().Changed("otel-insecure") {
+		finalOtelInsecure = config.OTEL.Insecure
+	}
+
+	finalOtelEnablePrometheusMetricsPath := otelEnablePrometheusMetricsPath
+	if !cmd.Flags().Changed("otel-enable-prometheus-metrics-path") {
+		finalOtelEnablePrometheusMetricsPath = config.OTEL.EnablePrometheusMetricsPath
+	}
+
+	return finalOtelEndpoint, finalOtelSamplingRate, finalOtelEnvironmentVariables,
+		finalOtelInsecure, finalOtelEnablePrometheusMetricsPath
 }
 
 // createOIDCConfig creates an OIDC configuration if any OIDC parameters are provided

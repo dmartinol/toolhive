@@ -8,15 +8,20 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
+	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	mcpv1alpha1 "github.com/stacklok/toolhive/cmd/thv-operator/api/v1alpha1"
+	"github.com/stacklok/toolhive/pkg/authz"
 	"github.com/stacklok/toolhive/pkg/logger"
 	"github.com/stacklok/toolhive/pkg/runner"
 	transporttypes "github.com/stacklok/toolhive/pkg/transport/types"
@@ -24,6 +29,12 @@ import (
 
 // defaultProxyHost is the default host for proxy binding
 const defaultProxyHost = "0.0.0.0"
+
+// defaultAPITimeout is the default timeout for Kubernetes API calls made during reconciliation
+const defaultAPITimeout = 15 * time.Second
+
+// defaultAuthzKey is the default key in the ConfigMap for authorization configuration
+const defaultAuthzKey = "authz.json"
 
 // RunConfig management methods
 
@@ -117,6 +128,7 @@ func (r *MCPServerReconciler) ensureRunConfigConfigMapResource(
 	mcpServer *mcpv1alpha1.MCPServer,
 	desired *corev1.ConfigMap,
 ) error {
+	ctxLogger := log.FromContext(ctx)
 	current := &corev1.ConfigMap{}
 	objectKey := types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}
 	err := r.Get(ctx, objectKey, current)
@@ -187,7 +199,9 @@ func (*MCPServerReconciler) runConfigContentEquals(current, desired *corev1.Conf
 
 // createRunConfigFromMCPServer converts MCPServer spec to RunConfig using the builder pattern
 // This creates a RunConfig for serialization to ConfigMap, not for direct execution
-func (*MCPServerReconciler) createRunConfigFromMCPServer(m *mcpv1alpha1.MCPServer) (*runner.RunConfig, error) {
+//
+//nolint:gocyclo
+func (r *MCPServerReconciler) createRunConfigFromMCPServer(m *mcpv1alpha1.MCPServer) (*runner.RunConfig, error) {
 	proxyHost := defaultProxyHost
 	if envHost := os.Getenv("TOOLHIVE_PROXY_HOST"); envHost != "" {
 		proxyHost = envHost
@@ -202,6 +216,34 @@ func (*MCPServerReconciler) createRunConfigFromMCPServer(m *mcpv1alpha1.MCPServe
 	envVars := convertEnvVarsFromMCPServer(m.Spec.Env)
 	volumes := convertVolumesFromMCPServer(m.Spec.Volumes)
 	secrets := convertSecretsFromMCPServer(m.Spec.Secrets)
+
+	// Get tool configuration from MCPToolConfig if referenced
+	toolsFilter := m.Spec.ToolsFilter
+	var toolsOverride map[string]runner.ToolOverride
+
+	if m.Spec.ToolConfigRef != nil {
+		// ToolConfigRef takes precedence over inline ToolsFilter
+		toolConfig, err := GetToolConfigForMCPServer(context.Background(), r.Client, m)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get MCPToolConfig: %w", err)
+		}
+
+		if toolConfig != nil {
+			// Use configuration from MCPToolConfig
+			toolsFilter = toolConfig.Spec.ToolsFilter
+
+			// Convert ToolOverride from CRD format to runner format
+			if len(toolConfig.Spec.ToolsOverride) > 0 {
+				toolsOverride = make(map[string]runner.ToolOverride)
+				for toolName, override := range toolConfig.Spec.ToolsOverride {
+					toolsOverride[toolName] = runner.ToolOverride{
+						Name:        override.Name,
+						Description: override.Description,
+					}
+				}
+			}
+		}
+	}
 
 	// Create K8s pod template patch if needed
 	var k8sPodPatch string
@@ -228,11 +270,16 @@ func (*MCPServerReconciler) createRunConfigFromMCPServer(m *mcpv1alpha1.MCPServe
 		runner.WithTransportAndPorts(m.Spec.Transport, port, int(m.Spec.TargetPort)),
 		runner.WithProxyMode(transporttypes.ProxyMode(proxyMode)),
 		runner.WithHost(proxyHost),
-		runner.WithToolsFilter(m.Spec.ToolsFilter),
+		runner.WithToolsFilter(toolsFilter),
 		runner.WithEnvVars(envVars),
 		runner.WithVolumes(volumes),
 		runner.WithSecrets(secrets),
 		runner.WithK8sPodPatch(k8sPodPatch),
+	}
+
+	// Add tools override if present
+	if toolsOverride != nil {
+		options = append(options, runner.WithToolsOverride(toolsOverride))
 	}
 
 	// Add permission profile if specified
@@ -253,6 +300,23 @@ func (*MCPServerReconciler) createRunConfigFromMCPServer(m *mcpv1alpha1.MCPServe
 			)
 		}
 	}
+
+	// Add telemetry configuration if specified
+	addTelemetryConfigOptions(&options, m.Spec.Telemetry, m.Name)
+
+	// Add authorization configuration if specified
+	ctx, cancel := context.WithTimeout(context.Background(), defaultAPITimeout)
+	defer cancel()
+
+	if err := r.addAuthzConfigOptions(ctx, m, &options, m.Spec.AuthzConfig); err != nil {
+		return nil, fmt.Errorf("failed to process AuthzConfig: %w", err)
+	}
+
+	// Add OIDC authentication configuration if specified
+	addOIDCConfigOptions(&options, m.Spec.OIDCConfig)
+
+	// Add audit configuration if specified
+	addAuditConfigOptions(&options, m.Spec.Audit)
 
 	// Use the RunConfigBuilder for operator context with full builder pattern
 	return runner.NewOperatorRunConfigBuilder(
@@ -498,4 +562,214 @@ func convertSecretsFromMCPServer(secs []mcpv1alpha1.SecretRef) []string {
 		secrets = append(secrets, fmt.Sprintf("%s,target=%s", secret.Name, target))
 	}
 	return secrets
+}
+
+// addTelemetryConfigOptions adds telemetry configuration options to the builder options
+func addTelemetryConfigOptions(
+	options *[]runner.RunConfigBuilderOption,
+	telemetryConfig *mcpv1alpha1.TelemetryConfig,
+	mcpServerName string,
+) {
+	if telemetryConfig == nil {
+		return
+	}
+
+	// Default values
+	var otelEndpoint string
+	var otelEnablePrometheusMetricsPath bool
+	var otelTracingEnabled bool
+	var otelMetricsEnabled bool
+	var otelServiceName string
+	var otelSamplingRate = 0.05 // Default sampling rate
+	var otelHeaders []string
+	var otelInsecure bool
+	var otelEnvironmentVariables []string
+
+	// Process OpenTelemetry configuration
+	if telemetryConfig.OpenTelemetry != nil && telemetryConfig.OpenTelemetry.Enabled {
+		otel := telemetryConfig.OpenTelemetry
+
+		// Strip http:// or https:// prefix if present, as OTLP client expects host:port format
+		otelEndpoint = strings.TrimPrefix(strings.TrimPrefix(otel.Endpoint, "https://"), "http://")
+		otelInsecure = otel.Insecure
+		otelHeaders = otel.Headers
+
+		// Use MCPServer name as service name if not specified
+		if otel.ServiceName != "" {
+			otelServiceName = otel.ServiceName
+		} else {
+			otelServiceName = mcpServerName
+		}
+
+		// Handle tracing configuration
+		if otel.Tracing != nil {
+			otelTracingEnabled = otel.Tracing.Enabled
+			if otel.Tracing.SamplingRate != "" {
+				// Parse sampling rate string to float64
+				if rate, err := strconv.ParseFloat(otel.Tracing.SamplingRate, 64); err == nil {
+					otelSamplingRate = rate
+				}
+			}
+		}
+
+		// Handle metrics configuration
+		if otel.Metrics != nil {
+			otelMetricsEnabled = otel.Metrics.Enabled
+		}
+	}
+
+	// Process Prometheus configuration
+	if telemetryConfig.Prometheus != nil {
+		otelEnablePrometheusMetricsPath = telemetryConfig.Prometheus.Enabled
+	}
+
+	// Add telemetry config to options
+	*options = append(*options, runner.WithTelemetryConfig(
+		otelEndpoint,
+		otelEnablePrometheusMetricsPath,
+		otelTracingEnabled,
+		otelMetricsEnabled,
+		otelServiceName,
+		otelSamplingRate,
+		otelHeaders,
+		otelInsecure,
+		otelEnvironmentVariables,
+	))
+}
+
+// addAuthzConfigOptions adds authorization configuration options to the builder options
+// Supports both inline and ConfigMap-based configurations.
+func (r *MCPServerReconciler) addAuthzConfigOptions(
+	ctx context.Context,
+	m *mcpv1alpha1.MCPServer,
+	options *[]runner.RunConfigBuilderOption,
+	authzRef *mcpv1alpha1.AuthzConfigRef,
+) error {
+	if authzRef == nil {
+		return nil
+	}
+
+	switch authzRef.Type {
+	case mcpv1alpha1.AuthzConfigTypeInline:
+		if authzRef.Inline == nil {
+			return fmt.Errorf("inline authz config type specified but inline config is nil")
+		}
+
+		policies := authzRef.Inline.Policies
+		entitiesJSON := authzRef.Inline.EntitiesJSON
+
+		// Create authorization config
+		authzCfg := &authz.Config{
+			Version: "v1",
+			Type:    authz.ConfigTypeCedarV1,
+			Cedar: &authz.CedarConfig{
+				Policies:     policies,
+				EntitiesJSON: entitiesJSON,
+			},
+		}
+
+		// Add authorization config to options
+		*options = append(*options, runner.WithAuthzConfig(authzCfg))
+		return nil
+
+	case mcpv1alpha1.AuthzConfigTypeConfigMap:
+		// Validate reference
+		if authzRef.ConfigMap == nil || authzRef.ConfigMap.Name == "" {
+			return fmt.Errorf("configMap authz config type specified but reference is missing name")
+		}
+		key := authzRef.ConfigMap.Key
+		if key == "" {
+			key = defaultAuthzKey
+		}
+
+		// Ensure we have a Kubernetes client to fetch the ConfigMap
+		if r.Client == nil {
+			return fmt.Errorf("kubernetes client is not configured for ConfigMap authz resolution")
+		}
+
+		// Fetch the ConfigMap from the same namespace as the MCPServer
+		var cm corev1.ConfigMap
+		if err := r.Get(ctx, types.NamespacedName{
+			Namespace: m.Namespace,
+			Name:      authzRef.ConfigMap.Name,
+		}, &cm); err != nil {
+			return fmt.Errorf("failed to get Authz ConfigMap %s/%s: %w", m.Namespace, authzRef.ConfigMap.Name, err)
+		}
+
+		raw, ok := cm.Data[key]
+		if !ok {
+			return fmt.Errorf("authz ConfigMap %s/%s is missing key %q", m.Namespace, authzRef.ConfigMap.Name, key)
+		}
+		if strings.TrimSpace(raw) == "" {
+			return fmt.Errorf("authz ConfigMap %s/%s key %q is empty", m.Namespace, authzRef.ConfigMap.Name, key)
+		}
+
+		// Unmarshal into authz.Config supporting YAML or JSON
+		var cfg authz.Config
+		// Try YAML first (it also handles JSON)
+		if err := yaml.Unmarshal([]byte(raw), &cfg); err != nil {
+			// Fallback to JSON explicitly for clearer error paths
+			if err2 := json.Unmarshal([]byte(raw), &cfg); err2 != nil {
+				return fmt.Errorf("failed to parse authz config from ConfigMap %s/%s key %q: %v; json fallback error: %v",
+					m.Namespace, authzRef.ConfigMap.Name, key, err, err2)
+			}
+		}
+
+		// Validate the config
+		if err := cfg.Validate(); err != nil {
+			return fmt.Errorf("invalid authz config from ConfigMap %s/%s key %q: %w",
+				m.Namespace, authzRef.ConfigMap.Name, key, err)
+		}
+
+		*options = append(*options, runner.WithAuthzConfig(&cfg))
+		return nil
+
+	default:
+		// Unknown type
+		return fmt.Errorf("unknown authz config type: %s", authzRef.Type)
+	}
+}
+
+// addOIDCConfigOptions adds OIDC authentication configuration options to the builder options
+func addOIDCConfigOptions(
+	options *[]runner.RunConfigBuilderOption,
+	oidcConfig *mcpv1alpha1.OIDCConfigRef,
+) {
+	if oidcConfig == nil {
+		return
+	}
+
+	// Handle inline OIDC configuration
+	if oidcConfig.Type == mcpv1alpha1.OIDCConfigTypeInline && oidcConfig.Inline != nil {
+		inline := oidcConfig.Inline
+
+		// Add OIDC config to options
+		*options = append(*options, runner.WithOIDCConfig(
+			inline.Issuer,
+			inline.Audience,
+			inline.JWKSURL,
+			inline.IntrospectionURL,
+			inline.ClientID,
+			inline.ClientSecret,
+			inline.ThvCABundlePath,
+			inline.JWKSAuthTokenPath,
+			"", // resourceURL - not available in InlineOIDCConfig
+			inline.JWKSAllowPrivateIP,
+		))
+	}
+
+	// ConfigMap and Kubernetes types are not currently supported for OIDC configuration
+}
+
+// addAuditConfigOptions adds audit configuration options to the builder options
+func addAuditConfigOptions(
+	options *[]runner.RunConfigBuilderOption,
+	auditConfig *mcpv1alpha1.AuditConfig,
+) {
+	if auditConfig == nil {
+		return
+	}
+
+	// Add audit config to options with default config (no custom config path for now)
+	*options = append(*options, runner.WithAuditEnabled(auditConfig.Enabled, ""))
 }

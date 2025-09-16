@@ -23,6 +23,7 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
+	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 
 	"github.com/stacklok/toolhive/pkg/container/docker/sdk"
 	"github.com/stacklok/toolhive/pkg/container/images"
@@ -55,12 +56,77 @@ const (
 	LabelValueTrue                 = "true"
 )
 
+// dockerAPI defines the minimal Docker client surface we need for unit-testing
+// ListWorkloads/GetWorkloadInfo through an adapter without requiring a live daemon.
+type dockerAPI interface {
+	ContainerList(ctx context.Context, options container.ListOptions) ([]container.Summary, error)
+	ContainerInspect(ctx context.Context, containerID string) (container.InspectResponse, error)
+	ContainerStop(ctx context.Context, containerID string, options container.StopOptions) error
+	ContainerCreate(
+		ctx context.Context,
+		config *container.Config,
+		hostConfig *container.HostConfig,
+		networkingConfig *network.NetworkingConfig,
+		platform *v1.Platform,
+		containerName string,
+	) (container.CreateResponse, error)
+	ContainerStart(ctx context.Context, containerID string, options container.StartOptions) error
+	ContainerRemove(ctx context.Context, containerID string, options container.RemoveOptions) error
+}
+
+// deployOps defines the internal operations used by DeployWorkload.
+// It allows unit tests to substitute a fake implementation to avoid hitting a real Docker daemon.
+type deployOps interface {
+	createExternalNetworks(ctx context.Context) error
+	createNetwork(ctx context.Context, name string, labels map[string]string, internal bool) error
+	createDnsContainer(
+		ctx context.Context,
+		dnsContainerName string,
+		attachStdio bool,
+		networkName string,
+		endpointsConfig map[string]*network.EndpointSettings,
+	) (string, string, error)
+	createEgressSquidContainer(
+		ctx context.Context,
+		containerName string,
+		squidContainerName string,
+		attachStdio bool,
+		exposedPorts map[string]struct{},
+		endpointsConfig map[string]*network.EndpointSettings,
+		perm *permissions.NetworkPermissions,
+	) (string, error)
+	createMcpContainer(
+		ctx context.Context,
+		name string,
+		networkName string,
+		image string,
+		command []string,
+		envVars map[string]string,
+		labels map[string]string,
+		attachStdio bool,
+		permissionConfig *runtime.PermissionConfig,
+		additionalDNS string,
+		exposedPorts map[string]struct{},
+		portBindings map[string][]runtime.PortBinding,
+		isolateNetwork bool,
+	) error
+	createIngressContainer(
+		ctx context.Context,
+		containerName string,
+		upstreamPort int,
+		attachStdio bool,
+		externalEndpointsConfig map[string]*network.EndpointSettings,
+	) (int, error)
+}
+
 // Client implements the Deployer interface for Docker (and compatible runtimes)
 type Client struct {
 	runtimeType  runtime.Type
 	socketPath   string
 	client       *client.Client
+	api          dockerAPI
 	imageManager images.ImageManager
+	ops          deployOps
 }
 
 // NewClient creates a new container client
@@ -76,10 +142,26 @@ func NewClient(ctx context.Context) (*Client, error) {
 		runtimeType:  runtimeType,
 		socketPath:   socketPath,
 		client:       dockerClient,
+		api:          dockerClient,
 		imageManager: imageManager,
 	}
+	// Default ops implementation uses the real client methods.
+	c.ops = c
 
 	return c, nil
+}
+
+// createEgressSquidContainer wraps the package-level createEgressSquidContainer to satisfy deployOps.
+func (c *Client) createEgressSquidContainer(
+	ctx context.Context,
+	containerName string,
+	squidContainerName string,
+	attachStdio bool,
+	exposedPorts map[string]struct{},
+	endpointsConfig map[string]*network.EndpointSettings,
+	perm *permissions.NetworkPermissions,
+) (string, error) {
+	return createEgressSquidContainer(ctx, c, containerName, squidContainerName, attachStdio, exposedPorts, endpointsConfig, perm)
 }
 
 // DeployWorkload creates and starts a workload.
@@ -120,7 +202,7 @@ func (c *Client) DeployWorkload(
 		"toolhive-external": {},
 	}
 
-	err = c.createExternalNetworks(ctx)
+	err = c.ops.createExternalNetworks(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("failed to create external networks: %v", err)
 	}
@@ -131,14 +213,14 @@ func (c *Client) DeployWorkload(
 
 		internalNetworkLabels := map[string]string{}
 		lb.AddNetworkLabels(internalNetworkLabels, networkName)
-		err := c.createNetwork(ctx, networkName, internalNetworkLabels, true)
+		err := c.ops.createNetwork(ctx, networkName, internalNetworkLabels, true)
 		if err != nil {
 			return 0, fmt.Errorf("failed to create internal network: %v", err)
 		}
 
 		// create dns container
 		dnsContainerName := fmt.Sprintf("%s-dns", name)
-		_, dnsContainerIP, err := c.createDnsContainer(ctx, dnsContainerName, attachStdio, networkName, externalEndpointsConfig)
+		_, dnsContainerIP, err := c.ops.createDnsContainer(ctx, dnsContainerName, attachStdio, networkName, externalEndpointsConfig)
 		if dnsContainerIP != "" {
 			additionalDNS = dnsContainerIP
 		}
@@ -148,9 +230,8 @@ func (c *Client) DeployWorkload(
 
 		// create egress container
 		egressContainerName := fmt.Sprintf("%s-egress", name)
-		_, err = createEgressSquidContainer(
+		_, err = c.ops.createEgressSquidContainer(
 			ctx,
-			c,
 			name,
 			egressContainerName,
 			attachStdio,
@@ -178,7 +259,7 @@ func (c *Client) DeployWorkload(
 	// about ingress/egress/dns containers.
 	lb.AddNetworkIsolationLabel(labels, networkIsolation)
 
-	err = c.createMcpContainer(
+	err = c.ops.createMcpContainer(
 		ctx,
 		name,
 		networkName,
@@ -208,7 +289,7 @@ func (c *Client) DeployWorkload(
 		if err != nil {
 			return 0, err // extractFirstPort already wraps the error with context.
 		}
-		hostPort, err = c.createIngressContainer(ctx, name, firstPortInt, attachStdio, externalEndpointsConfig)
+		hostPort, err = c.ops.createIngressContainer(ctx, name, firstPortInt, attachStdio, externalEndpointsConfig)
 		if err != nil {
 			return 0, fmt.Errorf("failed to create ingress container: %v", err)
 		}
@@ -224,7 +305,7 @@ func (c *Client) ListWorkloads(ctx context.Context) ([]runtime.ContainerInfo, er
 	filterArgs.Add("label", "toolhive=true")
 
 	// List containers
-	containers, err := c.client.ContainerList(ctx, container.ListOptions{
+	containers, err := c.api.ContainerList(ctx, container.ListOptions{
 		All:     true,
 		Filters: filterArgs,
 	})
@@ -294,7 +375,7 @@ func (c *Client) StopWorkload(ctx context.Context, workloadName string) error {
 
 	// Use a reasonable timeout
 	timeoutSeconds := 30
-	err = c.client.ContainerStop(ctx, workloadName, container.StopOptions{Timeout: &timeoutSeconds})
+	err = c.api.ContainerStop(ctx, workloadName, container.StopOptions{Timeout: &timeoutSeconds})
 	if err != nil {
 		return NewContainerError(err, workloadName, fmt.Sprintf("failed to stop workload: %v", err))
 	}
@@ -699,7 +780,7 @@ func (c *Client) getPermissionConfigFromProfile(
 
 // findExistingContainer finds a container with the exact name
 func (c *Client) findExistingContainer(ctx context.Context, name string) (string, error) {
-	containers, err := c.client.ContainerList(ctx, container.ListOptions{
+	containers, err := c.api.ContainerList(ctx, container.ListOptions{
 		All: true, // Include stopped containers
 		Filters: filters.NewArgs(
 			filters.Arg("name", name),
@@ -942,7 +1023,7 @@ func (c *Client) handleExistingContainer(
 	desiredHostConfig *container.HostConfig,
 ) (bool, error) {
 	// Get container info
-	info, err := c.client.ContainerInspect(ctx, containerID)
+	info, err := c.api.ContainerInspect(ctx, containerID)
 	if err != nil {
 		return false, NewContainerError(err, containerID, fmt.Sprintf("failed to inspect container: %v", err))
 	}
@@ -954,7 +1035,7 @@ func (c *Client) handleExistingContainer(
 		// Check if the container is running
 		if !info.State.Running {
 			// Container exists but is not running, start it
-			err = c.client.ContainerStart(ctx, containerID, container.StartOptions{})
+			err = c.api.ContainerStart(ctx, containerID, container.StartOptions{})
 			if err != nil {
 				return false, NewContainerError(err, containerID, fmt.Sprintf("failed to start existing container: %v", err))
 			}
@@ -1030,7 +1111,7 @@ func (c *Client) deleteNetwork(ctx context.Context, name string) error {
 
 // removeContainer removes a container by ID, without removing any associated networks or proxy containers.
 func (c *Client) removeContainer(ctx context.Context, containerID string) error {
-	err := c.client.ContainerRemove(ctx, containerID, container.RemoveOptions{
+	err := c.api.ContainerRemove(ctx, containerID, container.RemoveOptions{
 		Force: true,
 	})
 	if err != nil {
@@ -1192,7 +1273,7 @@ func (c *Client) createContainer(
 	}
 
 	// Create the container
-	resp, err := c.client.ContainerCreate(
+	resp, err := c.api.ContainerCreate(
 		ctx,
 		config,
 		hostConfig,
@@ -1205,7 +1286,7 @@ func (c *Client) createContainer(
 	}
 
 	// Start the container
-	err = c.client.ContainerStart(ctx, resp.ID, container.StartOptions{})
+	err = c.api.ContainerStart(ctx, resp.ID, container.StartOptions{})
 	if err != nil {
 		return "", NewContainerError(err, resp.ID, fmt.Sprintf("failed to start container: %v", err))
 	}
@@ -1462,11 +1543,13 @@ func (c *Client) stopProxyContainer(ctx context.Context, containerName string, t
 	containerId, err := c.findExistingContainer(ctx, containerName)
 	if err != nil {
 		logger.Debugf("Failed to find internal container %s: %v", containerName, err)
-	} else {
-		err = c.client.ContainerStop(ctx, containerId, container.StopOptions{Timeout: &timeoutSeconds})
-		if err != nil {
-			logger.Debugf("Failed to stop internal container %s: %v", containerName, err)
-		}
+		return
+	}
+	if containerId == "" {
+		return
+	}
+	if err := c.api.ContainerStop(ctx, containerId, container.StopOptions{Timeout: &timeoutSeconds}); err != nil {
+		logger.Debugf("Failed to stop internal container %s: %v", containerName, err)
 	}
 }
 
@@ -1513,26 +1596,60 @@ func dockerToDomainStatus(status string) runtime.WorkloadStatus {
 	return runtime.WorkloadStatusUnknown
 }
 
-// inspectContainerByName finds a container by the workload name and inspects it.
-func (c *Client) inspectContainerByName(ctx context.Context, workloadName string) (container.InspectResponse, error) {
-	empty := container.InspectResponse{}
-
-	// Since the Docker API expects a lookup by ID, do a search by name and label instead.
+// findContainerByLabel finds a container by the base name label.
+// Returns the container ID if found, empty string otherwise.
+func (c *Client) findContainerByLabel(ctx context.Context, workloadName string) (string, error) {
 	filterArgs := filters.NewArgs()
 	filterArgs.Add("label", "toolhive=true")
-	filterArgs.Add("name", workloadName)
+	filterArgs.Add("label", fmt.Sprintf("toolhive-basename=%s", workloadName))
 
-	containers, err := c.client.ContainerList(ctx, container.ListOptions{
+	containers, err := c.api.ContainerList(ctx, container.ListOptions{
 		All:     true,
 		Filters: filterArgs,
 	})
 	if err != nil {
-		return empty, NewContainerError(err, "", fmt.Sprintf("failed to list containers: %v", err))
+		return "", NewContainerError(err, "", fmt.Sprintf("failed to list containers: %v", err))
 	}
 
 	if len(containers) == 0 {
-		return empty, NewContainerError(runtime.ErrWorkloadNotFound, workloadName, "no containers found")
+		return "", nil
 	}
+
+	// If multiple containers have the same base name, prefer the running one
+	var containerID string
+	for _, cont := range containers {
+		if cont.State == "running" {
+			containerID = cont.ID
+			break
+		}
+	}
+	// If no running container found, use the first one
+	if containerID == "" {
+		containerID = containers[0].ID
+	}
+
+	return containerID, nil
+}
+
+// findContainerByExactName finds a container by exact name matching.
+// Returns the container ID if found, empty string otherwise.
+func (c *Client) findContainerByExactName(ctx context.Context, workloadName string) (string, error) {
+	filterArgs := filters.NewArgs()
+	filterArgs.Add("label", "toolhive=true")
+	filterArgs.Add("name", workloadName)
+
+	containers, err := c.api.ContainerList(ctx, container.ListOptions{
+		All:     true,
+		Filters: filterArgs,
+	})
+	if err != nil {
+		return "", NewContainerError(err, "", fmt.Sprintf("failed to list containers: %v", err))
+	}
+
+	if len(containers) == 0 {
+		return "", nil
+	}
+
 	// Docker does a prefix match on the name. If we find multiple containers,
 	// we need to filter down to the exact name requested.
 	var containerID string
@@ -1547,12 +1664,38 @@ func (c *Client) inspectContainerByName(ctx context.Context, workloadName string
 			return slices.Contains(c.Names, prefixedName)
 		})
 		if idx == -1 {
-			return empty, NewContainerError(runtime.ErrWorkloadNotFound, workloadName, "no containers found with the exact name")
+			return "", nil
 		}
 		containerID = containers[idx].ID
 	} else {
 		containerID = containers[0].ID
 	}
 
-	return c.client.ContainerInspect(ctx, containerID)
+	return containerID, nil
+}
+
+// inspectContainerByName finds a container by the workload name and inspects it.
+// It first tries to find by base name label, then falls back to exact name matching.
+func (c *Client) inspectContainerByName(ctx context.Context, workloadName string) (container.InspectResponse, error) {
+	empty := container.InspectResponse{}
+
+	// First try to find container by base name label
+	containerID, err := c.findContainerByLabel(ctx, workloadName)
+	if err != nil {
+		return empty, err
+	}
+	if containerID != "" {
+		return c.api.ContainerInspect(ctx, containerID)
+	}
+
+	// Fall back to exact name matching for backward compatibility
+	containerID, err = c.findContainerByExactName(ctx, workloadName)
+	if err != nil {
+		return empty, err
+	}
+	if containerID == "" {
+		return empty, NewContainerError(runtime.ErrWorkloadNotFound, workloadName, "no containers found")
+	}
+
+	return c.api.ContainerInspect(ctx, containerID)
 }

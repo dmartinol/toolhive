@@ -78,8 +78,6 @@ var defaultRBACRules = []rbacv1.PolicyRule{
 	},
 }
 
-var ctxLogger = log.FromContext(context.Background())
-
 // mcpContainerName is the name of the mcp container used in pod templates
 const mcpContainerName = "mcp"
 
@@ -127,6 +125,7 @@ func (r *MCPServerReconciler) detectPlatform(ctx context.Context) (kubernetes.Pl
 // +kubebuilder:rbac:groups=toolhive.stacklok.dev,resources=mcpservers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=toolhive.stacklok.dev,resources=mcpservers/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=toolhive.stacklok.dev,resources=mcpservers/finalizers,verbs=update
+// +kubebuilder:rbac:groups=toolhive.stacklok.dev,resources=mcptoolconfigs,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=create;delete;get;list;patch;update;watch
 // +kubebuilder:rbac:groups="",resources=services,verbs=create;delete;get;list;patch;update;watch;apply
 // +kubebuilder:rbac:groups="rbac.authorization.k8s.io",resources=roles,verbs=create;delete;get;list;patch;update;watch
@@ -145,7 +144,7 @@ func (r *MCPServerReconciler) detectPlatform(ctx context.Context) (kubernetes.Pl
 //
 //nolint:gocyclo
 func (r *MCPServerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	ctxLogger = log.FromContext(ctx)
+	ctxLogger := log.FromContext(ctx)
 
 	// Fetch the MCPServer instance
 	mcpServer := &mcpv1alpha1.MCPServer{}
@@ -159,6 +158,17 @@ func (r *MCPServerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 		// Error reading the object - requeue the request.
 		ctxLogger.Error(err, "Failed to get MCPServer")
+		return ctrl.Result{}, err
+	}
+
+	// Check if MCPToolConfig is referenced and handle it
+	if err := r.handleToolConfig(ctx, mcpServer); err != nil {
+		ctxLogger.Error(err, "Failed to handle MCPToolConfig")
+		// Update status to reflect the error
+		mcpServer.Status.Phase = mcpv1alpha1.MCPServerPhaseFailed
+		if statusErr := r.Status().Update(ctx, mcpServer); statusErr != nil {
+			ctxLogger.Error(statusErr, "Failed to update MCPServer status after MCPToolConfig error")
+		}
 		return ctrl.Result{}, err
 	}
 
@@ -346,6 +356,7 @@ func (r *MCPServerReconciler) createRBACResource(
 	resourceType string,
 	createResource func() client.Object,
 ) error {
+	ctxLogger := log.FromContext(ctx)
 	desired := createResource()
 	if err := controllerutil.SetControllerReference(mcpServer, desired, r.Scheme); err != nil {
 		logger.Errorf("Failed to set controller reference for %s: %v", resourceType, err)
@@ -372,6 +383,7 @@ func (r *MCPServerReconciler) updateRBACResourceIfNeeded(
 	createResource func() client.Object,
 	current client.Object,
 ) error {
+	ctxLogger := log.FromContext(ctx)
 	desired := createResource()
 	if err := controllerutil.SetControllerReference(mcpServer, desired, r.Scheme); err != nil {
 		logger.Errorf("Failed to set controller reference for %s: %v", resourceType, err)
@@ -393,6 +405,51 @@ func (r *MCPServerReconciler) updateRBACResourceIfNeeded(
 }
 
 // ensureRBACResources ensures that the RBAC resources are in place for the MCP server
+
+// handleToolConfig handles MCPToolConfig reference for an MCPServer
+func (r *MCPServerReconciler) handleToolConfig(ctx context.Context, m *mcpv1alpha1.MCPServer) error {
+	ctxLogger := log.FromContext(ctx)
+	if m.Spec.ToolConfigRef == nil {
+		// No MCPToolConfig referenced, clear any stored hash
+		if m.Status.ToolConfigHash != "" {
+			m.Status.ToolConfigHash = ""
+			if err := r.Status().Update(ctx, m); err != nil {
+				return fmt.Errorf("failed to clear MCPToolConfig hash from status: %w", err)
+			}
+		}
+		return nil
+	}
+
+	// Get the referenced MCPToolConfig
+	toolConfig, err := GetToolConfigForMCPServer(ctx, r.Client, m)
+	if err != nil {
+		return err
+	}
+
+	if toolConfig == nil {
+		return fmt.Errorf("MCPToolConfig %s not found", m.Spec.ToolConfigRef.Name)
+	}
+
+	// Check if the MCPToolConfig hash has changed
+	if m.Status.ToolConfigHash != toolConfig.Status.ConfigHash {
+		ctxLogger.Info("MCPToolConfig has changed, updating MCPServer",
+			"mcpserver", m.Name,
+			"toolconfig", toolConfig.Name,
+			"oldHash", m.Status.ToolConfigHash,
+			"newHash", toolConfig.Status.ConfigHash)
+
+		// Update the stored hash
+		m.Status.ToolConfigHash = toolConfig.Status.ConfigHash
+		if err := r.Status().Update(ctx, m); err != nil {
+			return fmt.Errorf("failed to update MCPToolConfig hash in status: %w", err)
+		}
+
+		// The change in hash will trigger a reconciliation of the RunConfig
+		// which will pick up the new tool configuration
+	}
+
+	return nil
+}
 func (r *MCPServerReconciler) ensureRBACResources(ctx context.Context, mcpServer *mcpv1alpha1.MCPServer) error {
 	proxyRunnerNameForRBAC := proxyRunnerServiceAccountName(mcpServer.Name)
 
@@ -452,7 +509,6 @@ func (r *MCPServerReconciler) ensureRBACResources(ctx context.Context, mcpServer
 	// otherwise, create a service account for the MCP server
 	mcpServerServiceAccountName := mcpServerServiceAccountName(mcpServer.Name)
 	return r.ensureRBACResource(ctx, mcpServer, "ServiceAccount", func() client.Object {
-		mcpServer.Spec.ServiceAccount = &mcpServerServiceAccountName
 		return &corev1.ServiceAccount{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      mcpServerServiceAccountName,
@@ -488,14 +544,24 @@ func (r *MCPServerReconciler) deploymentForMCPServer(ctx context.Context, m *mcp
 		if m.Spec.TargetPort != 0 {
 			args = append(args, fmt.Sprintf("--target-port=%d", m.Spec.TargetPort))
 		}
+		// Add proxy mode for stdio transport
+		if m.Spec.ProxyMode != "" {
+			args = append(args, fmt.Sprintf("--proxy-mode=%s", m.Spec.ProxyMode))
+		}
 	}
 
 	// Add pod template patch and permission profile only if not using ConfigMap
 	// When using ConfigMap, these are included in the runconfig.json
 	if !useConfigMap {
 		// Generate pod template patch for secrets and merge with user-provided patch
+		// If service account is not specified, use the default MCP server service account
+		serviceAccount := m.Spec.ServiceAccount
+		if serviceAccount == nil {
+			defaultSA := mcpServerServiceAccountName(m.Name)
+			serviceAccount = &defaultSA
+		}
 		finalPodTemplateSpec := NewMCPServerPodTemplateSpecBuilder(m.Spec.PodTemplateSpec).
-			WithServiceAccount(m.Spec.ServiceAccount).
+			WithServiceAccount(serviceAccount).
 			WithSecrets(m.Spec.Secrets).
 			Build()
 		// Add pod template patch if we have one
@@ -519,8 +585,9 @@ func (r *MCPServerReconciler) deploymentForMCPServer(ctx context.Context, m *mcp
 		}
 	}
 
-	// Add OIDC configuration args
-	if m.Spec.OIDCConfig != nil {
+	// Add OIDC configuration args only if not using ConfigMap
+	// When using ConfigMap, OIDC configuration is included in the runconfig.json
+	if !useConfigMap && m.Spec.OIDCConfig != nil {
 		// Create a context with timeout for OIDC configuration operations
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -536,14 +603,16 @@ func (r *MCPServerReconciler) deploymentForMCPServer(ctx context.Context, m *mcp
 		args = append(args, fmt.Sprintf("--resource-url=%s", resourceURL))
 	}
 
-	// Add authorization configuration args
-	if m.Spec.AuthzConfig != nil {
+	// Add authorization configuration args only if not using ConfigMap
+	// When using ConfigMap, authorization configuration is included in the runconfig.json
+	if !useConfigMap && m.Spec.AuthzConfig != nil {
 		authzArgs := r.generateAuthzArgs(m)
 		args = append(args, authzArgs...)
 	}
 
-	// Add audit configuration args
-	if m.Spec.Audit != nil && m.Spec.Audit.Enabled {
+	// Add audit configuration args only if not using ConfigMap
+	// When using ConfigMap, audit configuration is included in the runconfig.json
+	if !useConfigMap && m.Spec.Audit != nil && m.Spec.Audit.Enabled {
 		args = append(args, "--enable-audit")
 	}
 
@@ -561,8 +630,9 @@ func (r *MCPServerReconciler) deploymentForMCPServer(ctx context.Context, m *mcp
 		}
 	}
 
-	// Add OpenTelemetry configuration args
-	if m.Spec.Telemetry != nil {
+	// Add OpenTelemetry configuration args only if not using ConfigMap
+	// When using ConfigMap, telemetry configuration is included in the runconfig.json
+	if !useConfigMap && m.Spec.Telemetry != nil {
 		if m.Spec.Telemetry.OpenTelemetry != nil {
 			otelArgs := r.generateOpenTelemetryArgs(m)
 			args = append(args, otelArgs...)
@@ -953,6 +1023,7 @@ func (r *MCPServerReconciler) updateMCPServerStatus(ctx context.Context, m *mcpv
 
 // finalizeMCPServer performs the finalizer logic for the MCPServer
 func (r *MCPServerReconciler) finalizeMCPServer(ctx context.Context, m *mcpv1alpha1.MCPServer) error {
+	ctxLogger := log.FromContext(ctx)
 	// Update the MCPServer status
 	m.Status.Phase = mcpv1alpha1.MCPServerPhaseTerminating
 	m.Status.Message = "MCP server is being terminated"
@@ -1127,8 +1198,14 @@ func (r *MCPServerReconciler) deploymentNeedsUpdate(deployment *appsv1.Deploymen
 		}
 
 		// Check if the pod template spec has changed (including secrets)
+		// If service account is not specified, use the default MCP server service account
+		serviceAccount := mcpServer.Spec.ServiceAccount
+		if serviceAccount == nil {
+			defaultSA := mcpServerServiceAccountName(mcpServer.Name)
+			serviceAccount = &defaultSA
+		}
 		expectedPodTemplateSpec := NewMCPServerPodTemplateSpecBuilder(mcpServer.Spec.PodTemplateSpec).
-			WithServiceAccount(mcpServer.Spec.ServiceAccount).
+			WithServiceAccount(serviceAccount).
 			WithSecrets(mcpServer.Spec.Secrets).
 			Build()
 
@@ -1344,9 +1421,9 @@ func (*MCPServerReconciler) generateAuthzVolumeConfig(m *mcpv1alpha1.MCPServer) 
 								if m.Spec.AuthzConfig.ConfigMap.Key != "" {
 									return m.Spec.AuthzConfig.ConfigMap.Key
 								}
-								return "authz.json"
+								return defaultAuthzKey
 							}(),
-							Path: "authz.json",
+							Path: defaultAuthzKey,
 						},
 					},
 				},
@@ -1375,8 +1452,8 @@ func (*MCPServerReconciler) generateAuthzVolumeConfig(m *mcpv1alpha1.MCPServer) 
 					},
 					Items: []corev1.KeyToPath{
 						{
-							Key:  "authz.json",
-							Path: "authz.json",
+							Key:  defaultAuthzKey,
+							Path: defaultAuthzKey,
 						},
 					},
 				},
@@ -1659,7 +1736,7 @@ func (*MCPServerReconciler) generateAuthzArgs(m *mcpv1alpha1.MCPServer) []string
 	}
 
 	// Both ConfigMap and inline configurations use the same mounted path
-	authzConfigPath := "/etc/toolhive/authz/authz.json"
+	authzConfigPath := fmt.Sprintf("/etc/toolhive/authz/%s", defaultAuthzKey)
 	args = append(args, fmt.Sprintf("--authz-config=%s", authzConfigPath))
 
 	return args
@@ -1760,6 +1837,7 @@ func (*MCPServerReconciler) generateOpenTelemetryEnvVars(m *mcpv1alpha1.MCPServe
 
 // ensureAuthzConfigMap ensures the authorization ConfigMap exists for inline configuration
 func (r *MCPServerReconciler) ensureAuthzConfigMap(ctx context.Context, m *mcpv1alpha1.MCPServer) error {
+	ctxLogger := log.FromContext(ctx)
 	// Only create ConfigMap for inline authorization configuration
 	if m.Spec.AuthzConfig == nil || m.Spec.AuthzConfig.Type != mcpv1alpha1.AuthzConfigTypeInline ||
 		m.Spec.AuthzConfig.Inline == nil {
@@ -1797,7 +1875,7 @@ func (r *MCPServerReconciler) ensureAuthzConfigMap(ctx context.Context, m *mcpv1
 			Labels:    labelsForInlineAuthzConfig(m.Name),
 		},
 		Data: map[string]string{
-			"authz.json": string(authzConfigJSON),
+			defaultAuthzKey: string(authzConfigJSON),
 		},
 	}
 
