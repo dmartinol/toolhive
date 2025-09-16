@@ -17,7 +17,7 @@ const (
 
 // GitSourceHandler handles registry data from Git repositories
 type GitSourceHandler struct {
-	gitClient git.GitClient
+	gitClient git.Client
 	validator SourceDataValidator
 }
 
@@ -73,9 +73,6 @@ func (*GitSourceHandler) Validate(source *mcpv1alpha1.MCPRegistrySource) error {
 
 // FetchRegistry retrieves registry data from the Git repository
 func (h *GitSourceHandler) FetchRegistry(ctx context.Context, mcpRegistry *mcpv1alpha1.MCPRegistry) (*FetchResult, error) {
-	if mcpRegistry.Spec.Source.Format == mcpv1alpha1.RegistryFormatUpstream {
-		return nil, fmt.Errorf("upstream registry format is not yet supported for Git sources")
-	}
 
 	// Validate source configuration
 	if err := h.Validate(&mcpRegistry.Spec.Source); err != nil {

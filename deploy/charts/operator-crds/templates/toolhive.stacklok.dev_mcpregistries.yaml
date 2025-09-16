@@ -124,11 +124,46 @@ spec:
                     - toolhive
                     - upstream
                     type: string
+                  git:
+                    description: |-
+                      Git defines the Git repository source configuration
+                      Only used when Type is "git"
+                    properties:
+                      branch:
+                        description: Branch is the Git branch to use (mutually exclusive
+                          with Tag and Commit)
+                        minLength: 1
+                        type: string
+                      commit:
+                        description: Commit is the Git commit SHA to use (mutually
+                          exclusive with Branch and Tag)
+                        minLength: 1
+                        type: string
+                      path:
+                        default: registry.json
+                        description: Path is the path to the registry file within
+                          the repository
+                        pattern: ^.*\.json$
+                        type: string
+                      repository:
+                        description: Repository is the Git repository URL (HTTP/HTTPS/SSH)
+                        minLength: 1
+                        pattern: ^(https?://|git@|ssh://|git://).*
+                        type: string
+                      tag:
+                        description: Tag is the Git tag to use (mutually exclusive
+                          with Branch and Commit)
+                        minLength: 1
+                        type: string
+                    required:
+                    - repository
+                    type: object
                   type:
                     default: configmap
-                    description: Type is the type of source (configmap)
+                    description: Type is the type of source (configmap, git)
                     enum:
                     - configmap
+                    - git
                     type: string
                 required:
                 - type
@@ -294,6 +329,12 @@ spec:
         - message: configMap field is required when source type is 'configmap'
           rule: 'self.spec.source.type == ''configmap'' ? has(self.spec.source.configmap)
             : true'
+        - message: git field is required when source type is 'git'
+          rule: 'self.spec.source.type == ''git'' ? has(self.spec.source.git) : true'
+        - message: only one of branch, tag, or commit may be specified for git source
+          rule: 'self.spec.source.type == ''git'' ? [has(self.spec.source.git.branch),
+            has(self.spec.source.git.tag), has(self.spec.source.git.commit)].filter(x,
+            x).size() <= 1 : true'
     served: true
     storage: true
     subresources:

@@ -63,7 +63,7 @@ func (r *MCPRegistryReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		ctxLogger.Error(err, "Failed to get MCPRegistry")
 		return ctrl.Result{}, err
 	}
-	ctxLogger.Info("Reconciling MCPRegistry", "MCPRegistry.Name", mcpRegistry.Name)
+	ctxLogger.Info("Reconciling MCPRegistry", "MCPRegistry.Name", mcpRegistry.Name, "phase", mcpRegistry.Status.Phase)
 
 	// 2. Handle deletion if DeletionTimestamp is set
 	if mcpRegistry.GetDeletionTimestamp() != nil {
@@ -174,7 +174,46 @@ func (r *MCPRegistryReconciler) reconcileSync(ctx context.Context, mcpRegistry *
 		return ctrl.Result{RequeueAfter: retryAfter}, err
 	}
 
-	// Schedule next automatic sync only if this was an automatic sync (not manual)
+	// Refresh object to check if sync actually succeeded or if failure was recorded
+	// Add retry logic to handle potential caching delays
+	var refreshedRegistry *mcpv1alpha1.MCPRegistry
+	for i := 0; i < 3; i++ {
+		freshRegistry := &mcpv1alpha1.MCPRegistry{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(mcpRegistry), freshRegistry); err != nil {
+			ctxLogger.Error(err, "Failed to refresh MCPRegistry after sync", "attempt", i+1)
+			return ctrl.Result{}, err
+		}
+
+		// If this is a retry and we see an updated syncAttempts, we got the fresh object
+		if i > 0 && freshRegistry.Status.SyncAttempts > mcpRegistry.Status.SyncAttempts {
+			ctxLogger.Info("Got fresh object after retry", "attempt", i+1, "syncAttempts", freshRegistry.Status.SyncAttempts)
+			refreshedRegistry = freshRegistry
+			break
+		}
+
+		// On first attempt, or if syncAttempts hasn't changed, use what we got
+		refreshedRegistry = freshRegistry
+		if i < 2 {
+			// Brief pause to let cache update (except on final attempt)
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+	// Log the actual phase we see for debugging
+	ctxLogger.V(1).Info("Post-sync phase check", "phase", refreshedRegistry.Status.Phase, "message", refreshedRegistry.Status.Message, "syncAttempts", refreshedRegistry.Status.SyncAttempts)
+
+	// Check if sync actually succeeded by looking at the phase
+	if refreshedRegistry.Status.Phase == mcpv1alpha1.MCPRegistryPhaseFailed {
+		ctxLogger.Info("Sync failed but failure was properly recorded, scheduling retry")
+		// Sync failed but failure was properly recorded - use sync manager's retry interval
+		retryAfter := time.Minute * 5 // Default fallback
+		if result.RequeueAfter > 0 {
+			retryAfter = result.RequeueAfter
+		}
+		return ctrl.Result{RequeueAfter: retryAfter}, nil
+	}
+
+	// Sync actually succeeded - schedule next automatic sync only if this was an automatic sync (not manual)
 	if mcpRegistry.Spec.SyncPolicy != nil && !sync.IsManualSync(syncReason) {
 		interval, parseErr := time.ParseDuration(mcpRegistry.Spec.SyncPolicy.Interval)
 		if parseErr == nil {

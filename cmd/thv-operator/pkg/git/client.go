@@ -9,8 +9,8 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 )
 
-// GitClient defines the interface for Git operations
-type GitClient interface {
+// Client defines the interface for Git operations
+type Client interface {
 	// Clone clones a repository with the given configuration
 	Clone(ctx context.Context, config *CloneConfig) (*RepositoryInfo, error)
 
@@ -99,7 +99,7 @@ func (c *DefaultGitClient) Clone(ctx context.Context, config *CloneConfig) (*Rep
 }
 
 // Pull updates an existing repository
-func (*DefaultGitClient) Pull(ctx context.Context, repoInfo *RepositoryInfo) error {
+func (*DefaultGitClient) Pull(_ context.Context, repoInfo *RepositoryInfo) error {
 	workTree, err := repoInfo.Repository.Worktree()
 	if err != nil {
 		return fmt.Errorf("failed to get worktree: %w", err)
