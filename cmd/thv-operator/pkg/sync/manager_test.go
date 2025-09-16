@@ -711,99 +711,6 @@ func TestDefaultSyncManager_Delete(t *testing.T) {
 	}
 }
 
-func TestDefaultSyncManager_updatePhase(t *testing.T) {
-	t.Parallel()
-
-	scheme := runtime.NewScheme()
-	require.NoError(t, mcpv1alpha1.AddToScheme(scheme))
-
-	mcpRegistry := &mcpv1alpha1.MCPRegistry{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-registry",
-			Namespace: "test-namespace",
-			UID:       types.UID("test-uid"),
-		},
-		Status: mcpv1alpha1.MCPRegistryStatus{
-			Phase: mcpv1alpha1.MCPRegistryPhasePending,
-		},
-	}
-
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithRuntimeObjects(mcpRegistry).
-		WithStatusSubresource(&mcpv1alpha1.MCPRegistry{}).
-		Build()
-
-	sourceHandlerFactory := sources.NewSourceHandlerFactory(fakeClient)
-	storageManager := sources.NewConfigMapStorageManager(fakeClient, scheme)
-	syncManager := NewDefaultSyncManager(fakeClient, scheme, sourceHandlerFactory, storageManager)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	err := syncManager.updatePhase(ctx, mcpRegistry, mcpv1alpha1.MCPRegistryPhaseSyncing, "Test message")
-	assert.NoError(t, err)
-
-	// Verify the phase was updated - check the modified object directly
-	// since the method modifies in place
-	assert.Equal(t, mcpv1alpha1.MCPRegistryPhaseSyncing, mcpRegistry.Status.Phase)
-	assert.Equal(t, "Test message", mcpRegistry.Status.Message)
-}
-
-func TestDefaultSyncManager_updatePhaseFailedWithCondition(t *testing.T) {
-	t.Parallel()
-
-	scheme := runtime.NewScheme()
-	require.NoError(t, mcpv1alpha1.AddToScheme(scheme))
-
-	mcpRegistry := &mcpv1alpha1.MCPRegistry{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-registry",
-			Namespace: "test-namespace",
-			UID:       types.UID("test-uid"),
-		},
-		Status: mcpv1alpha1.MCPRegistryStatus{
-			Phase: mcpv1alpha1.MCPRegistryPhasePending,
-		},
-	}
-
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithRuntimeObjects(mcpRegistry).
-		WithStatusSubresource(&mcpv1alpha1.MCPRegistry{}).
-		Build()
-
-	sourceHandlerFactory := sources.NewSourceHandlerFactory(fakeClient)
-	storageManager := sources.NewConfigMapStorageManager(fakeClient, scheme)
-	syncManager := NewDefaultSyncManager(fakeClient, scheme, sourceHandlerFactory, storageManager)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	err := syncManager.updatePhaseFailedWithCondition(
-		ctx,
-		mcpRegistry,
-		"Test failure message",
-		mcpv1alpha1.ConditionSourceAvailable,
-		"TestFailure",
-		"Test condition message",
-	)
-	assert.NoError(t, err)
-
-	// Verify the phase and condition were updated - check the modified object directly
-	// since the method modifies in place after refreshing from client
-	assert.Equal(t, mcpv1alpha1.MCPRegistryPhaseFailed, mcpRegistry.Status.Phase)
-	assert.Equal(t, "Test failure message", mcpRegistry.Status.Message)
-
-	// Check condition was set
-	require.Len(t, mcpRegistry.Status.Conditions, 1)
-	condition := mcpRegistry.Status.Conditions[0]
-	assert.Equal(t, mcpv1alpha1.ConditionSourceAvailable, condition.Type)
-	assert.Equal(t, metav1.ConditionFalse, condition.Status)
-	assert.Equal(t, "TestFailure", condition.Reason)
-	assert.Equal(t, "Test condition message", condition.Message)
-}
-
 func TestIsManualSync(t *testing.T) {
 	t.Parallel()
 
@@ -815,6 +722,7 @@ func TestIsManualSync(t *testing.T) {
 		{ReasonManualNoChanges, true},
 		{ReasonSourceDataChanged, false},
 		{ReasonRegistryNotReady, false},
+		{ReasonRetryBackoffActive, false},
 		{ReasonUpToDateWithPolicy, false},
 	}
 
@@ -823,6 +731,82 @@ func TestIsManualSync(t *testing.T) {
 			t.Parallel()
 			result := IsManualSync(tt.reason)
 			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestDefaultSyncManager_calculateRetryInterval(t *testing.T) {
+	t.Parallel()
+
+	syncManager := &DefaultSyncManager{}
+
+	tests := []struct {
+		name         string
+		syncAttempts int
+		expected     time.Duration
+		description  string
+	}{
+		{
+			name:         "zero attempts",
+			syncAttempts: 0,
+			expected:     time.Minute * 5,
+			description:  "Should return base interval for zero attempts",
+		},
+		{
+			name:         "negative attempts",
+			syncAttempts: -1,
+			expected:     time.Minute * 5,
+			description:  "Should return base interval for negative attempts",
+		},
+		{
+			name:         "first retry",
+			syncAttempts: 1,
+			expected:     time.Minute * 5, // 5min * 2^(1-1) = 5min * 1 = 5min
+			description:  "Should return base interval for first retry",
+		},
+		{
+			name:         "second retry",
+			syncAttempts: 2,
+			expected:     time.Minute * 10, // 5min * 2^(2-1) = 5min * 2 = 10min
+			description:  "Should return doubled interval for second retry",
+		},
+		{
+			name:         "third retry",
+			syncAttempts: 3,
+			expected:     time.Minute * 20, // 5min * 2^(3-1) = 5min * 4 = 20min
+			description:  "Should return 4x interval for third retry",
+		},
+		{
+			name:         "fourth retry",
+			syncAttempts: 4,
+			expected:     time.Minute * 40, // 5min * 2^(4-1) = 5min * 8 = 40min
+			description:  "Should return 8x interval for fourth retry",
+		},
+		{
+			name:         "fifth retry",
+			syncAttempts: 5,
+			expected:     time.Hour * 1, // 5min * 2^(5-1) = 5min * 16 = 80min, capped at 60min
+			description:  "Should return max interval (1 hour) for fifth retry",
+		},
+		{
+			name:         "sixth retry",
+			syncAttempts: 6,
+			expected:     time.Hour * 1, // Should be capped at max interval
+			description:  "Should return max interval (1 hour) for sixth retry",
+		},
+		{
+			name:         "very high attempts",
+			syncAttempts: 100,
+			expected:     time.Hour * 1, // Should be capped at max interval
+			description:  "Should return max interval (1 hour) for very high attempts",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := syncManager.calculateRetryInterval(tt.syncAttempts)
+			assert.Equal(t, tt.expected, result, tt.description)
 		})
 	}
 }

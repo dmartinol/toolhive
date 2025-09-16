@@ -109,14 +109,29 @@ func (r *MCPRegistryReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// 3. Check if sync is needed before performing it
 	result, err := r.reconcileSync(ctx, mcpRegistry)
 
-	// Log reconciliation completion
+	// Refresh registry to get the actual current phase for logging
+	var currentPhase mcpv1alpha1.MCPRegistryPhase
+	if refreshErr := r.Get(ctx, client.ObjectKeyFromObject(mcpRegistry), mcpRegistry); refreshErr != nil {
+		ctxLogger.V(1).Error(refreshErr, "Failed to refresh registry for final logging")
+		currentPhase = "Unknown"
+	} else {
+		currentPhase = mcpRegistry.Status.Phase
+	}
+
+	// Log reconciliation completion with actual outcome
 	if err != nil {
 		ctxLogger.Error(err, "Reconciliation completed with error",
-			"MCPRegistry.Name", mcpRegistry.Name)
+			"MCPRegistry.Name", mcpRegistry.Name,
+			"phase", currentPhase)
+	} else if currentPhase == mcpv1alpha1.MCPRegistryPhaseFailed {
+		ctxLogger.Info("Reconciliation completed - sync failed, retry scheduled",
+			"MCPRegistry.Name", mcpRegistry.Name,
+			"phase", currentPhase,
+			"requeueAfter", result.RequeueAfter)
 	} else {
 		ctxLogger.Info("Reconciliation completed successfully",
 			"MCPRegistry.Name", mcpRegistry.Name,
-			"phase", mcpRegistry.Status.Phase,
+			"phase", currentPhase,
 			"requeueAfter", result.RequeueAfter)
 	}
 
@@ -200,7 +215,13 @@ func (r *MCPRegistryReconciler) reconcileSync(ctx context.Context, mcpRegistry *
 	}
 
 	// Log the actual phase we see for debugging
-	ctxLogger.V(1).Info("Post-sync phase check", "phase", refreshedRegistry.Status.Phase, "message", refreshedRegistry.Status.Message, "syncAttempts", refreshedRegistry.Status.SyncAttempts)
+	ctxLogger.V(1).Info(
+		"Post-sync phase check",
+		"phase",
+		refreshedRegistry.Status.Phase,
+		"message", refreshedRegistry.Status.Message,
+		"syncAttempts",
+		refreshedRegistry.Status.SyncAttempts)
 
 	// Check if sync actually succeeded by looking at the phase
 	if refreshedRegistry.Status.Phase == mcpv1alpha1.MCPRegistryPhaseFailed {

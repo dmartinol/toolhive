@@ -20,8 +20,9 @@ import (
 // Sync reason constants
 const (
 	// Registry state related reasons
-	ReasonAlreadyInProgress = "sync-already-in-progress"
-	ReasonRegistryNotReady  = "registry-not-ready"
+	ReasonAlreadyInProgress  = "sync-already-in-progress"
+	ReasonRegistryNotReady   = "registry-not-ready"
+	ReasonRetryBackoffActive = "retry-backoff-active"
 
 	// Data change related reasons
 	ReasonSourceDataChanged    = "source-data-changed"
@@ -38,6 +39,16 @@ const (
 	// Up-to-date reasons
 	ReasonUpToDateWithPolicy = "up-to-date-with-policy"
 	ReasonUpToDateNoPolicy   = "up-to-date-no-policy"
+)
+
+// Retry limit constants
+const (
+	// MaxSyncAttempts is the maximum number of sync attempts before giving up
+	MaxSyncAttempts = 10
+	// MaxValidationRetries is the maximum number of retries for validation failures (permanent errors)
+	MaxValidationRetries = 3
+	// MaxHandlerCreationRetries is the maximum number of retries for handler creation failures
+	MaxHandlerCreationRetries = 3
 )
 
 // Manual sync annotation detection reasons
@@ -134,6 +145,14 @@ func (s *DefaultSyncManager) ShouldSync(
 
 	// If registry is in Failed or Pending state, sync is needed
 	if mcpRegistry.Status.Phase != mcpv1alpha1.MCPRegistryPhaseReady {
+		// For Failed state, check if we should respect the retry timing
+		if mcpRegistry.Status.Phase == mcpv1alpha1.MCPRegistryPhaseFailed && mcpRegistry.Status.NextRetryTime != nil {
+			now := time.Now()
+			if now.Before(mcpRegistry.Status.NextRetryTime.Time) {
+				// Still within retry backoff period - schedule next check
+				return false, ReasonRetryBackoffActive, &mcpRegistry.Status.NextRetryTime.Time, nil
+			}
+		}
 		return true, ReasonRegistryNotReady, nil, nil
 	}
 
@@ -173,58 +192,162 @@ func (s *DefaultSyncManager) ShouldSync(
 	return false, ReasonUpToDateNoPolicy, nil, nil
 }
 
+// statusUpdate represents all status changes for a single sync operation
+type statusUpdate struct {
+	Phase       mcpv1alpha1.MCPRegistryPhase
+	Message     string
+	Conditions  []metav1.Condition
+	SyncData    *syncData
+	RetryResult *ctrl.Result
+}
+
+// syncData contains sync-specific status fields
+type syncData struct {
+	LastSyncTime          *metav1.Time
+	LastSyncHash          string
+	ServerCount           int
+	StorageRef            *mcpv1alpha1.StorageReference
+	SyncAttempts          int
+	NextRetryTime         *metav1.Time
+	LastManualSyncTrigger string
+}
+
 // PerformSync performs the complete sync operation for the MCPRegistry
 func (s *DefaultSyncManager) PerformSync(ctx context.Context, mcpRegistry *mcpv1alpha1.MCPRegistry) (ctrl.Result, error) {
-	// Update phase to syncing
-	if err := s.updatePhase(ctx, mcpRegistry, mcpv1alpha1.MCPRegistryPhaseSyncing, "Synchronizing registry data"); err != nil {
-		return ctrl.Result{}, err
-	}
 	ctxLogger := log.FromContext(ctx)
+
+	// Note: No early status update - all status changes will be applied at the end
 
 	// Fetch and process registry data
 	fetchResult, err := s.fetchAndProcessRegistryData(ctx, mcpRegistry)
 	if err != nil {
 		ctxLogger.Error(err, "Failed to create source handler")
-		if updateErr := s.updatePhaseFailedWithCondition(ctx, mcpRegistry,
-			fmt.Sprintf("Failed to create source handler: %v", err),
-			mcpv1alpha1.ConditionSourceAvailable, conditionReasonHandlerCreationFailed, err.Error()); updateErr != nil {
-			ctxLogger.Error(updateErr, "Failed to update status after handler creation failure")
-			// Return only requeue result without error to avoid exponential backoff
-			return ctrl.Result{RequeueAfter: time.Minute * 5}, nil
+
+		// Check retry limits for handler creation failures
+		if mcpRegistry.Status.SyncAttempts >= MaxHandlerCreationRetries {
+			ctxLogger.Error(err, "Max handler creation retries exceeded, giving up",
+				"maxRetries", MaxHandlerCreationRetries, "attempts", mcpRegistry.Status.SyncAttempts)
+			return s.applyFinalStatusUpdate(ctx, mcpRegistry, &statusUpdate{
+				Phase:   mcpv1alpha1.MCPRegistryPhaseFailed,
+				Message: fmt.Sprintf("Failed to create source handler after %d attempts: %v", mcpRegistry.Status.SyncAttempts, err),
+				Conditions: []metav1.Condition{{
+					Type:    mcpv1alpha1.ConditionSourceAvailable,
+					Status:  metav1.ConditionFalse,
+					Reason:  conditionReasonHandlerCreationFailed,
+					Message: err.Error(),
+				}},
+				SyncData: &syncData{
+					SyncAttempts: mcpRegistry.Status.SyncAttempts + 1,
+				},
+				RetryResult: &ctrl.Result{}, // Don't requeue - giving up
+			})
 		}
-		// Handler creation failure is permanent - don't retry rapidly
-		return ctrl.Result{RequeueAfter: time.Hour * 1}, nil
+
+		nextRetryTime := metav1.NewTime(time.Now().Add(time.Hour * 1))
+		return s.applyFinalStatusUpdate(ctx, mcpRegistry, &statusUpdate{
+			Phase:   mcpv1alpha1.MCPRegistryPhaseFailed,
+			Message: fmt.Sprintf("Failed to create source handler: %v", err),
+			Conditions: []metav1.Condition{{
+				Type:    mcpv1alpha1.ConditionSourceAvailable,
+				Status:  metav1.ConditionFalse,
+				Reason:  conditionReasonHandlerCreationFailed,
+				Message: err.Error(),
+			}},
+			SyncData: &syncData{
+				SyncAttempts:  mcpRegistry.Status.SyncAttempts + 1,
+				NextRetryTime: &nextRetryTime,
+			},
+			RetryResult: &ctrl.Result{RequeueAfter: time.Hour * 1}, // Handler creation failure is permanent
+		})
 	}
 
 	// Validate source configuration
 	if err := sourceHandler.Validate(&mcpRegistry.Spec.Source); err != nil {
 		ctxLogger.Error(err, "Source validation failed")
-		if updateErr := s.updatePhaseFailedWithCondition(ctx, mcpRegistry,
-			fmt.Sprintf("Source validation failed: %v", err),
-			mcpv1alpha1.ConditionSourceAvailable, conditionReasonValidationFailed, err.Error()); updateErr != nil {
-			ctxLogger.Error(updateErr, "Failed to update status after validation failure")
-			// Return only requeue result without error to avoid exponential backoff
-			return ctrl.Result{RequeueAfter: time.Minute * 5}, nil
+
+		// Check retry limits for validation failures
+		if mcpRegistry.Status.SyncAttempts >= MaxValidationRetries {
+			ctxLogger.Error(err, "Max validation retries exceeded, giving up",
+				"maxRetries", MaxValidationRetries, "attempts", mcpRegistry.Status.SyncAttempts)
+			return s.applyFinalStatusUpdate(ctx, mcpRegistry, &statusUpdate{
+				Phase:   mcpv1alpha1.MCPRegistryPhaseFailed,
+				Message: fmt.Sprintf("Source validation failed after %d attempts: %v", mcpRegistry.Status.SyncAttempts, err),
+				Conditions: []metav1.Condition{{
+					Type:    mcpv1alpha1.ConditionSourceAvailable,
+					Status:  metav1.ConditionFalse,
+					Reason:  conditionReasonValidationFailed,
+					Message: err.Error(),
+				}},
+				SyncData: &syncData{
+					SyncAttempts: mcpRegistry.Status.SyncAttempts + 1,
+				},
+				RetryResult: &ctrl.Result{}, // Don't requeue - giving up
+			})
 		}
-		// Validation failure is permanent - don't retry rapidly
-		return ctrl.Result{RequeueAfter: time.Hour * 1}, nil
+
+		nextRetryTime := metav1.NewTime(time.Now().Add(time.Hour * 1))
+		return s.applyFinalStatusUpdate(ctx, mcpRegistry, &statusUpdate{
+			Phase:   mcpv1alpha1.MCPRegistryPhaseFailed,
+			Message: fmt.Sprintf("Source validation failed: %v", err),
+			Conditions: []metav1.Condition{{
+				Type:    mcpv1alpha1.ConditionSourceAvailable,
+				Status:  metav1.ConditionFalse,
+				Reason:  conditionReasonValidationFailed,
+				Message: err.Error(),
+			}},
+			SyncData: &syncData{
+				SyncAttempts:  mcpRegistry.Status.SyncAttempts + 1,
+				NextRetryTime: &nextRetryTime,
+			},
+			RetryResult: &ctrl.Result{RequeueAfter: time.Hour * 1}, // Validation failure is permanent
+		})
 	}
 
 	// Execute fetch operation
 	fetchResult, err := sourceHandler.FetchRegistry(ctx, mcpRegistry)
 	if err != nil {
 		ctxLogger.Error(err, "Fetch operation failed")
-		if updateErr := s.updatePhaseFailedWithCondition(ctx, mcpRegistry,
-			fmt.Sprintf("Fetch failed: %v", err),
-			mcpv1alpha1.ConditionSyncSuccessful, conditionReasonFetchFailed, err.Error()); updateErr != nil {
-			ctxLogger.Error(updateErr, "Failed to update status after fetch failure")
-			// Return only requeue result without error to avoid exponential backoff
-			return ctrl.Result{RequeueAfter: time.Minute * 5}, nil
+
+		// Check retry limits for fetch failures
+		if mcpRegistry.Status.SyncAttempts >= MaxSyncAttempts {
+			ctxLogger.Error(err, "Max sync attempts exceeded, giving up",
+				"maxRetries", MaxSyncAttempts, "attempts", mcpRegistry.Status.SyncAttempts)
+			return s.applyFinalStatusUpdate(ctx, mcpRegistry, &statusUpdate{
+				Phase:   mcpv1alpha1.MCPRegistryPhaseFailed,
+				Message: fmt.Sprintf("Fetch failed after %d attempts: %v", mcpRegistry.Status.SyncAttempts, err),
+				Conditions: []metav1.Condition{{
+					Type:    mcpv1alpha1.ConditionSyncSuccessful,
+					Status:  metav1.ConditionFalse,
+					Reason:  conditionReasonFetchFailed,
+					Message: err.Error(),
+				}},
+				SyncData: &syncData{
+					SyncAttempts: mcpRegistry.Status.SyncAttempts + 1,
+				},
+				RetryResult: &ctrl.Result{}, // Don't requeue - giving up
+			})
 		}
+
 		// Use exponential backoff for fetch failures (could be transient)
 		retryInterval := s.calculateRetryInterval(mcpRegistry.Status.SyncAttempts)
-		ctxLogger.Info("Scheduling retry with exponential backoff", "syncAttempts", mcpRegistry.Status.SyncAttempts, "retryAfter", retryInterval)
-		return ctrl.Result{RequeueAfter: retryInterval}, nil
+		nextRetryTime := metav1.NewTime(time.Now().Add(retryInterval))
+		ctxLogger.Info("Scheduling retry with exponential backoff",
+			"syncAttempts", mcpRegistry.Status.SyncAttempts, "retryAfter", retryInterval)
+		return s.applyFinalStatusUpdate(ctx, mcpRegistry, &statusUpdate{
+			Phase:   mcpv1alpha1.MCPRegistryPhaseFailed,
+			Message: fmt.Sprintf("Fetch failed: %v", err),
+			Conditions: []metav1.Condition{{
+				Type:    mcpv1alpha1.ConditionSyncSuccessful,
+				Status:  metav1.ConditionFalse,
+				Reason:  conditionReasonFetchFailed,
+				Message: err.Error(),
+			}},
+			SyncData: &syncData{
+				SyncAttempts:  mcpRegistry.Status.SyncAttempts + 1,
+				NextRetryTime: &nextRetryTime,
+			},
+			RetryResult: &ctrl.Result{RequeueAfter: retryInterval},
+		})
 	}
 
 	ctxLogger.Info("Registry data fetched successfully from source",
@@ -235,22 +358,108 @@ func (s *DefaultSyncManager) PerformSync(ctx context.Context, mcpRegistry *mcpv1
 	// Store registry data
 	if err := s.storageManager.Store(ctx, mcpRegistry, fetchResult.Registry); err != nil {
 		ctxLogger.Error(err, "Failed to store registry data")
-		if updateErr := s.updatePhaseFailedWithCondition(ctx, mcpRegistry,
-			fmt.Sprintf("Storage failed: %v", err),
-			mcpv1alpha1.ConditionSyncSuccessful, conditionReasonStorageFailed, err.Error()); updateErr != nil {
-			ctxLogger.Error(updateErr, "Failed to update status after storage failure")
-			// Return only requeue result without error to avoid exponential backoff
-			return ctrl.Result{RequeueAfter: time.Minute * 5}, nil
+
+		// Check retry limits for storage failures
+		if mcpRegistry.Status.SyncAttempts >= MaxSyncAttempts {
+			ctxLogger.Error(err, "Max sync attempts exceeded, giving up",
+				"maxRetries", MaxSyncAttempts, "attempts", mcpRegistry.Status.SyncAttempts)
+			return s.applyFinalStatusUpdate(ctx, mcpRegistry, &statusUpdate{
+				Phase:   mcpv1alpha1.MCPRegistryPhaseFailed,
+				Message: fmt.Sprintf("Storage failed after %d attempts: %v", mcpRegistry.Status.SyncAttempts, err),
+				Conditions: []metav1.Condition{{
+					Type:    mcpv1alpha1.ConditionSyncSuccessful,
+					Status:  metav1.ConditionFalse,
+					Reason:  conditionReasonStorageFailed,
+					Message: err.Error(),
+				}},
+				SyncData: &syncData{
+					SyncAttempts: mcpRegistry.Status.SyncAttempts + 1,
+				},
+				RetryResult: &ctrl.Result{}, // Don't requeue - giving up
+			})
 		}
+
 		// Use exponential backoff for storage failures (could be transient)
 		retryInterval := s.calculateRetryInterval(mcpRegistry.Status.SyncAttempts)
-		ctxLogger.Info("Scheduling retry with exponential backoff", "syncAttempts", mcpRegistry.Status.SyncAttempts, "retryAfter", retryInterval)
-		return ctrl.Result{RequeueAfter: retryInterval}, nil
+		nextRetryTime := metav1.NewTime(time.Now().Add(retryInterval))
+		ctxLogger.Info("Scheduling retry with exponential backoff",
+			"syncAttempts", mcpRegistry.Status.SyncAttempts, "retryAfter", retryInterval)
+		return s.applyFinalStatusUpdate(ctx, mcpRegistry, &statusUpdate{
+			Phase:   mcpv1alpha1.MCPRegistryPhaseFailed,
+			Message: fmt.Sprintf("Storage failed: %v", err),
+			Conditions: []metav1.Condition{{
+				Type:    mcpv1alpha1.ConditionSyncSuccessful,
+				Status:  metav1.ConditionFalse,
+				Reason:  conditionReasonStorageFailed,
+				Message: err.Error(),
+			}},
+			SyncData: &syncData{
+				SyncAttempts:  mcpRegistry.Status.SyncAttempts + 1,
+				NextRetryTime: &nextRetryTime,
+			},
+			RetryResult: &ctrl.Result{RequeueAfter: retryInterval},
+		})
 	}
 
 	ctxLogger.Info("Registry data stored successfully",
 		"namespace", mcpRegistry.Namespace,
 		"registryName", mcpRegistry.Name)
+
+	// Get storage reference
+	storageRef := s.storageManager.GetStorageReference(mcpRegistry)
+
+	// Prepare manual sync trigger tracking
+	var lastManualSyncTrigger string
+	if mcpRegistry.Annotations != nil {
+		if triggerValue := mcpRegistry.Annotations[SyncTriggerAnnotation]; triggerValue != "" {
+			lastManualSyncTrigger = triggerValue
+			ctxLogger.Info("Manual sync trigger processed", "trigger", triggerValue)
+		}
+	}
+
+	// Prepare success status update
+	now := metav1.Now()
+	return s.applyFinalStatusUpdate(ctx, mcpRegistry, &statusUpdate{
+		Phase:   mcpv1alpha1.MCPRegistryPhaseReady,
+		Message: "Registry is ready and synchronized",
+		Conditions: []metav1.Condition{
+			{
+				Type:    mcpv1alpha1.ConditionSourceAvailable,
+				Status:  metav1.ConditionTrue,
+				Reason:  conditionReasonSourceReady,
+				Message: "Source configuration is valid and accessible",
+			},
+			{
+				Type:    mcpv1alpha1.ConditionDataValid,
+				Status:  metav1.ConditionTrue,
+				Reason:  conditionReasonDataValid,
+				Message: "Registry data is valid and parsed successfully",
+			},
+			{
+				Type:    mcpv1alpha1.ConditionSyncSuccessful,
+				Status:  metav1.ConditionTrue,
+				Reason:  conditionReasonSyncCompleted,
+				Message: "Registry sync completed successfully",
+			},
+		},
+		SyncData: &syncData{
+			LastSyncTime:          &now,
+			LastSyncHash:          fetchResult.Hash,
+			ServerCount:           fetchResult.ServerCount,
+			StorageRef:            storageRef,
+			SyncAttempts:          0, // Reset on success
+			LastManualSyncTrigger: lastManualSyncTrigger,
+		},
+		RetryResult: &ctrl.Result{}, // Success - no retry needed
+	})
+}
+
+// applyFinalStatusUpdate applies all status changes in a single update operation
+func (s *DefaultSyncManager) applyFinalStatusUpdate(
+	ctx context.Context,
+	mcpRegistry *mcpv1alpha1.MCPRegistry,
+	update *statusUpdate) (ctrl.Result, error) {
+	ctxLogger := log.FromContext(ctx)
 
 	// Refresh the object to get latest resourceVersion before final update
 	if err := s.client.Get(ctx, client.ObjectKeyFromObject(mcpRegistry), mcpRegistry); err != nil {
@@ -258,48 +467,37 @@ func (s *DefaultSyncManager) PerformSync(ctx context.Context, mcpRegistry *mcpv1
 		return ctrl.Result{}, err
 	}
 
-	// Get storage reference
-	storageRef := s.storageManager.GetStorageReference(mcpRegistry)
+	// Apply phase and message
+	mcpRegistry.Status.Phase = update.Phase
+	mcpRegistry.Status.Message = update.Message
 
-	// Update status with successful sync - batch all updates
-	now := metav1.Now()
-	mcpRegistry.Status.Phase = mcpv1alpha1.MCPRegistryPhaseReady
-	mcpRegistry.Status.Message = "Registry is ready and synchronized"
-	mcpRegistry.Status.LastSyncTime = &now
-	mcpRegistry.Status.LastSyncHash = fetchResult.Hash
-	mcpRegistry.Status.ServerCount = fetchResult.ServerCount
-	mcpRegistry.Status.SyncAttempts = 0 // Reset on success
-	if storageRef != nil {
-		mcpRegistry.Status.StorageRef = storageRef
-	}
-
-	// Update manual sync trigger tracking if annotation exists
-	if mcpRegistry.Annotations != nil {
-		if triggerValue := mcpRegistry.Annotations[SyncTriggerAnnotation]; triggerValue != "" {
-			mcpRegistry.Status.LastManualSyncTrigger = triggerValue
-			ctxLogger.Info("Manual sync trigger processed", "trigger", triggerValue)
+	// Apply sync data if provided
+	if update.SyncData != nil {
+		if update.SyncData.LastSyncTime != nil {
+			mcpRegistry.Status.LastSyncTime = update.SyncData.LastSyncTime
 		}
+		if update.SyncData.LastSyncHash != "" {
+			mcpRegistry.Status.LastSyncHash = update.SyncData.LastSyncHash
+		}
+		if update.SyncData.ServerCount > 0 {
+			mcpRegistry.Status.ServerCount = update.SyncData.ServerCount
+		}
+		if update.SyncData.StorageRef != nil {
+			mcpRegistry.Status.StorageRef = update.SyncData.StorageRef
+		}
+		if update.SyncData.LastManualSyncTrigger != "" {
+			mcpRegistry.Status.LastManualSyncTrigger = update.SyncData.LastManualSyncTrigger
+		}
+		// Always update NextRetryTime (even if nil to clear it on success)
+		mcpRegistry.Status.NextRetryTime = update.SyncData.NextRetryTime
+		// Always update sync attempts
+		mcpRegistry.Status.SyncAttempts = update.SyncData.SyncAttempts
 	}
 
-	// Set all success conditions in memory
-	meta.SetStatusCondition(&mcpRegistry.Status.Conditions, metav1.Condition{
-		Type:    mcpv1alpha1.ConditionSourceAvailable,
-		Status:  metav1.ConditionTrue,
-		Reason:  conditionReasonSourceReady,
-		Message: "Source configuration is valid and accessible",
-	})
-	meta.SetStatusCondition(&mcpRegistry.Status.Conditions, metav1.Condition{
-		Type:    mcpv1alpha1.ConditionDataValid,
-		Status:  metav1.ConditionTrue,
-		Reason:  conditionReasonDataValid,
-		Message: "Registry data is valid and parsed successfully",
-	})
-	meta.SetStatusCondition(&mcpRegistry.Status.Conditions, metav1.Condition{
-		Type:    mcpv1alpha1.ConditionSyncSuccessful,
-		Status:  metav1.ConditionTrue,
-		Reason:  conditionReasonSyncCompleted,
-		Message: "Registry sync completed successfully",
-	})
+	// Apply conditions
+	for _, condition := range update.Conditions {
+		meta.SetStatusCondition(&mcpRegistry.Status.Conditions, condition)
+	}
 
 	// Single final status update
 	if err := s.client.Status().Update(ctx, mcpRegistry); err != nil {
@@ -307,6 +505,19 @@ func (s *DefaultSyncManager) PerformSync(ctx context.Context, mcpRegistry *mcpv1
 		return ctrl.Result{}, err
 	}
 
+	// Log completion based on phase
+	if update.Phase == mcpv1alpha1.MCPRegistryPhaseReady {
+		ctxLogger.Info("MCPRegistry sync completed successfully",
+			"serverCount", update.SyncData.ServerCount,
+			"hash", update.SyncData.LastSyncHash)
+	} else {
+		ctxLogger.Info("MCPRegistry sync failed", "phase", update.Phase, "message", update.Message)
+	}
+
+	// Return the specified retry result
+	if update.RetryResult != nil {
+		return *update.RetryResult, nil
+	}
 	return ctrl.Result{}, nil
 }
 
@@ -499,71 +710,23 @@ func (s *DefaultSyncManager) storeRegistryData(
 	return nil
 }
 
-// updateSuccessfulSyncStatus updates the MCPRegistry status after a successful sync operation
-func (s *DefaultSyncManager) updateSuccessfulSyncStatus(
-	ctx context.Context,
-	mcpRegistry *mcpv1alpha1.MCPRegistry,
-	fetchResult *sources.FetchResult) error {
-	ctxLogger := log.FromContext(ctx)
+// calculateRetryInterval calculates retry interval with exponential backoff
+func (*DefaultSyncManager) calculateRetryInterval(syncAttempts int) time.Duration {
+	// Base interval: 5 minutes
+	baseInterval := time.Minute * 5
 
-	// Refresh the object to get latest resourceVersion before final update
-	if err := s.client.Get(ctx, client.ObjectKeyFromObject(mcpRegistry), mcpRegistry); err != nil {
-		ctxLogger.Error(err, "Failed to refresh MCPRegistry object")
-		return err
+	// Cap at 1 hour maximum
+	maxInterval := time.Hour * 1
+
+	// Exponential backoff: 5m, 10m, 20m, 40m, 60m, 60m...
+	// Formula: baseInterval * 2^(attempts-1), capped at maxInterval
+	if syncAttempts <= 0 {
+		return baseInterval
 	}
 
-	// Get storage reference
-	storageRef := s.storageManager.GetStorageReference(mcpRegistry)
+	// Calculate 2^(attempts-1) but cap the exponent to prevent overflow
+	exponent := min(syncAttempts-1, 4) // 2^4 = 16, so 5min * 16 = 80min, close to our 60min cap
 
-	// Update status with successful sync - batch all updates
-	now := metav1.Now()
-	mcpRegistry.Status.Phase = mcpv1alpha1.MCPRegistryPhaseReady
-	mcpRegistry.Status.Message = "Registry is ready and synchronized"
-	mcpRegistry.Status.LastSyncTime = &now
-	mcpRegistry.Status.LastSyncHash = fetchResult.Hash
-	mcpRegistry.Status.ServerCount = fetchResult.ServerCount
-	mcpRegistry.Status.SyncAttempts = 0 // Reset on success
-	if storageRef != nil {
-		mcpRegistry.Status.StorageRef = storageRef
-	}
-
-	// Update manual sync trigger tracking if annotation exists
-	if mcpRegistry.Annotations != nil {
-		if triggerValue := mcpRegistry.Annotations[SyncTriggerAnnotation]; triggerValue != "" {
-			mcpRegistry.Status.LastManualSyncTrigger = triggerValue
-			ctxLogger.Info("Manual sync trigger processed", "trigger", triggerValue)
-		}
-	}
-
-	// Set all success conditions in memory
-	meta.SetStatusCondition(&mcpRegistry.Status.Conditions, metav1.Condition{
-		Type:    mcpv1alpha1.ConditionSourceAvailable,
-		Status:  metav1.ConditionTrue,
-		Reason:  conditionReasonSourceReady,
-		Message: "Source configuration is valid and accessible",
-	})
-	meta.SetStatusCondition(&mcpRegistry.Status.Conditions, metav1.Condition{
-		Type:    mcpv1alpha1.ConditionDataValid,
-		Status:  metav1.ConditionTrue,
-		Reason:  conditionReasonDataValid,
-		Message: "Registry data is valid and parsed successfully",
-	})
-	meta.SetStatusCondition(&mcpRegistry.Status.Conditions, metav1.Condition{
-		Type:    mcpv1alpha1.ConditionSyncSuccessful,
-		Status:  metav1.ConditionTrue,
-		Reason:  conditionReasonSyncCompleted,
-		Message: "Registry sync completed successfully",
-	})
-
-	// Single final status update
-	if err := s.client.Status().Update(ctx, mcpRegistry); err != nil {
-		ctxLogger.Error(err, "Failed to update final status")
-		return err
-	}
-
-	ctxLogger.Info("MCPRegistry sync completed successfully",
-		"serverCount", fetchResult.ServerCount,
-		"hash", fetchResult.Hash)
-
-	return nil
+	interval := baseInterval * time.Duration(1<<exponent) // 1<<n is 2^n
+	return min(interval, maxInterval)
 }

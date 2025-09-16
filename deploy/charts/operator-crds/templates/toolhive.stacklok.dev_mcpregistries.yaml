@@ -278,6 +278,12 @@ spec:
                 description: Message provides additional information about the current
                   phase
                 type: string
+              nextRetryTime:
+                description: |-
+                  NextRetryTime is the earliest time when the next sync attempt should occur
+                  Used to prevent aggressive retries after failures
+                format: date-time
+                type: string
               phase:
                 description: Phase represents the current phase of the MCPRegistry
                 enum:

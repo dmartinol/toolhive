@@ -313,6 +313,10 @@ func (in *MCPRegistryStatus) DeepCopyInto(out *MCPRegistryStatus) {
 		in, out := &in.LastSyncTime, &out.LastSyncTime
 		*out = (*in).DeepCopy()
 	}
+	if in.NextRetryTime != nil {
+		in, out := &in.NextRetryTime, &out.NextRetryTime
+		*out = (*in).DeepCopy()
+	}
 	if in.StorageRef != nil {
 		in, out := &in.StorageRef, &out.StorageRef
 		*out = new(StorageReference)

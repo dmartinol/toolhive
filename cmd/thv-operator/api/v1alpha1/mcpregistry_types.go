@@ -190,6 +190,11 @@ type MCPRegistryStatus struct {
 	// +kubebuilder:validation:Minimum=0
 	SyncAttempts int `json:"syncAttempts,omitempty"`
 
+	// NextRetryTime is the earliest time when the next sync attempt should occur
+	// Used to prevent aggressive retries after failures
+	// +optional
+	NextRetryTime *metav1.Time `json:"nextRetryTime,omitempty"`
+
 	// APIEndpoint is the URL of the registry API service
 	// +optional
 	APIEndpoint string `json:"apiEndpoint,omitempty"`
