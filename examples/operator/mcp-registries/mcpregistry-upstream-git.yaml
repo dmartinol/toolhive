@@ -1,0 +1,12 @@
+  apiVersion: toolhive.stacklok.dev/v1alpha1
+  kind: MCPRegistry
+  metadata:
+    name: mcp-registry-simple
+    namespace: toolhive-system
+  spec:
+    source:
+      type: git
+      format: upstream
+      git:
+        repository: "https://github.com/modelcontextprotocol/registry.git"
+        path: "data/seed.json"
