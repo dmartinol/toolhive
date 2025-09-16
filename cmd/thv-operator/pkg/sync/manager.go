@@ -179,6 +179,7 @@ func (s *DefaultSyncManager) PerformSync(ctx context.Context, mcpRegistry *mcpv1
 	if err := s.updatePhase(ctx, mcpRegistry, mcpv1alpha1.MCPRegistryPhaseSyncing, "Synchronizing registry data"); err != nil {
 		return ctrl.Result{}, err
 	}
+	ctxLogger := log.FromContext(ctx)
 
 	// Fetch and process registry data
 	fetchResult, err := s.fetchAndProcessRegistryData(ctx, mcpRegistry)
