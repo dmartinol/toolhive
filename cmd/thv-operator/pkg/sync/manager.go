@@ -218,8 +218,8 @@ func (s *DefaultSyncManager) PerformSync(ctx context.Context, mcpRegistry *mcpv1
 
 	// Note: No early status update - all status changes will be applied at the end
 
-	// Fetch and process registry data
-	fetchResult, err := s.fetchAndProcessRegistryData(ctx, mcpRegistry)
+	// Get source handler
+	sourceHandler, err := s.sourceHandlerFactory.CreateHandler(mcpRegistry.Spec.Source.Type)
 	if err != nil {
 		ctxLogger.Error(err, "Failed to create source handler")
 
@@ -355,6 +355,11 @@ func (s *DefaultSyncManager) PerformSync(ctx context.Context, mcpRegistry *mcpv1
 		"format", fetchResult.Format,
 		"hash", fetchResult.Hash)
 
+	// Apply filtering if configured
+	if err := s.applyFilteringIfConfigured(ctx, mcpRegistry, fetchResult); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Store registry data
 	if err := s.storageManager.Store(ctx, mcpRegistry, fetchResult.Registry); err != nil {
 		ctxLogger.Error(err, "Failed to store registry data")
@@ -454,6 +459,40 @@ func (s *DefaultSyncManager) PerformSync(ctx context.Context, mcpRegistry *mcpv1
 	})
 }
 
+// UpdateManualSyncTriggerOnly updates the manual sync trigger tracking without performing actual sync
+func (s *DefaultSyncManager) UpdateManualSyncTriggerOnly(
+	ctx context.Context,
+	mcpRegistry *mcpv1alpha1.MCPRegistry) (ctrl.Result, error) {
+	ctxLogger := log.FromContext(ctx)
+
+	// Refresh the object to get latest resourceVersion
+	if err := s.client.Get(ctx, client.ObjectKeyFromObject(mcpRegistry), mcpRegistry); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Update manual sync trigger tracking
+	if mcpRegistry.Annotations != nil {
+		if triggerValue := mcpRegistry.Annotations[SyncTriggerAnnotation]; triggerValue != "" {
+			mcpRegistry.Status.LastManualSyncTrigger = triggerValue
+			ctxLogger.Info("Manual sync trigger processed (no data changes)", "trigger", triggerValue)
+		}
+	}
+
+	// Update status
+	if err := s.client.Status().Update(ctx, mcpRegistry); err != nil {
+		ctxLogger.Error(err, "Failed to update manual sync trigger tracking")
+		return ctrl.Result{}, err
+	}
+
+	ctxLogger.Info("Manual sync completed (no data changes required)")
+	return ctrl.Result{}, nil
+}
+
+// Delete cleans up storage resources for the MCPRegistry
+func (s *DefaultSyncManager) Delete(ctx context.Context, mcpRegistry *mcpv1alpha1.MCPRegistry) error {
+	return s.storageManager.Delete(ctx, mcpRegistry)
+}
+
 // applyFinalStatusUpdate applies all status changes in a single update operation
 func (s *DefaultSyncManager) applyFinalStatusUpdate(
 	ctx context.Context,
@@ -521,195 +560,6 @@ func (s *DefaultSyncManager) applyFinalStatusUpdate(
 	return ctrl.Result{}, nil
 }
 
-// UpdateManualSyncTriggerOnly updates the manual sync trigger tracking without performing actual sync
-func (s *DefaultSyncManager) UpdateManualSyncTriggerOnly(
-	ctx context.Context,
-	mcpRegistry *mcpv1alpha1.MCPRegistry) (ctrl.Result, error) {
-	ctxLogger := log.FromContext(ctx)
-
-	// Refresh the object to get latest resourceVersion
-	if err := s.client.Get(ctx, client.ObjectKeyFromObject(mcpRegistry), mcpRegistry); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// Update manual sync trigger tracking
-	if mcpRegistry.Annotations != nil {
-		if triggerValue := mcpRegistry.Annotations[SyncTriggerAnnotation]; triggerValue != "" {
-			mcpRegistry.Status.LastManualSyncTrigger = triggerValue
-			ctxLogger.Info("Manual sync trigger processed (no data changes)", "trigger", triggerValue)
-		}
-	}
-
-	// Update status
-	if err := s.client.Status().Update(ctx, mcpRegistry); err != nil {
-		ctxLogger.Error(err, "Failed to update manual sync trigger tracking")
-		return ctrl.Result{}, err
-	}
-
-	ctxLogger.Info("Manual sync completed (no data changes required)")
-	return ctrl.Result{}, nil
-}
-
-// Delete cleans up storage resources for the MCPRegistry
-func (s *DefaultSyncManager) Delete(ctx context.Context, mcpRegistry *mcpv1alpha1.MCPRegistry) error {
-	return s.storageManager.Delete(ctx, mcpRegistry)
-}
-
-// updatePhase updates the MCPRegistry phase and message
-func (s *DefaultSyncManager) updatePhase(ctx context.Context, mcpRegistry *mcpv1alpha1.MCPRegistry,
-	phase mcpv1alpha1.MCPRegistryPhase, message string) error {
-	mcpRegistry.Status.Phase = phase
-	mcpRegistry.Status.Message = message
-	return s.client.Status().Update(ctx, mcpRegistry)
-}
-
-// updatePhaseFailedWithCondition updates phase, message and sets a condition
-func (s *DefaultSyncManager) updatePhaseFailedWithCondition(ctx context.Context, mcpRegistry *mcpv1alpha1.MCPRegistry,
-	message string, conditionType string, reason, conditionMessage string) error {
-	ctxLogger := log.FromContext(ctx)
-
-	// Refresh object to get latest resourceVersion
-	if err := s.client.Get(ctx, client.ObjectKeyFromObject(mcpRegistry), mcpRegistry); err != nil {
-		return fmt.Errorf("failed to refresh MCPRegistry before status update: %w", err)
-	}
-
-	ctxLogger.V(1).Info("Updating phase to Failed", "currentPhase", mcpRegistry.Status.Phase, "newMessage", message, "currentSyncAttempts", mcpRegistry.Status.SyncAttempts)
-
-	mcpRegistry.Status.Phase = mcpv1alpha1.MCPRegistryPhaseFailed
-	mcpRegistry.Status.Message = message
-	// Increment sync attempts on failures
-	mcpRegistry.Status.SyncAttempts++
-
-	// Set condition
-	meta.SetStatusCondition(&mcpRegistry.Status.Conditions, metav1.Condition{
-		Type:    conditionType,
-		Status:  metav1.ConditionFalse,
-		Reason:  reason,
-		Message: conditionMessage,
-	})
-
-	return s.client.Status().Update(ctx, mcpRegistry)
-}
-
-// fetchAndProcessRegistryData handles source handler creation, validation, fetch, and filtering
-func (s *DefaultSyncManager) fetchAndProcessRegistryData(
-	ctx context.Context,
-	mcpRegistry *mcpv1alpha1.MCPRegistry) (*sources.FetchResult, error) {
-	ctxLogger := log.FromContext(ctx)
-
-	// Get source handler
-	sourceHandler, err := s.sourceHandlerFactory.CreateHandler(mcpRegistry.Spec.Source.Type)
-	if err != nil {
-		ctxLogger.Error(err, "Failed to create source handler")
-		if updateErr := s.updatePhaseFailedWithCondition(ctx, mcpRegistry,
-			fmt.Sprintf("Failed to create source handler: %v", err),
-			mcpv1alpha1.ConditionSourceAvailable, conditionReasonHandlerCreationFailed, err.Error()); updateErr != nil {
-			ctxLogger.Error(updateErr, "Failed to update status after handler creation failure")
-		}
-		return nil, err
-	}
-
-	// Validate source configuration
-	if err := sourceHandler.Validate(&mcpRegistry.Spec.Source); err != nil {
-		ctxLogger.Error(err, "Source validation failed")
-		if updateErr := s.updatePhaseFailedWithCondition(ctx, mcpRegistry,
-			fmt.Sprintf("Source validation failed: %v", err),
-			mcpv1alpha1.ConditionSourceAvailable, conditionReasonValidationFailed, err.Error()); updateErr != nil {
-			ctxLogger.Error(updateErr, "Failed to update status after validation failure")
-		}
-		return nil, err
-	}
-
-	// Execute fetch operation
-	fetchResult, err := sourceHandler.FetchRegistry(ctx, mcpRegistry)
-	if err != nil {
-		ctxLogger.Error(err, "Fetch operation failed")
-		// Increment sync attempts
-		mcpRegistry.Status.SyncAttempts++
-		if updateErr := s.updatePhaseFailedWithCondition(ctx, mcpRegistry,
-			fmt.Sprintf("Fetch failed: %v", err),
-			mcpv1alpha1.ConditionSyncSuccessful, conditionReasonFetchFailed, err.Error()); updateErr != nil {
-			ctxLogger.Error(updateErr, "Failed to update status after fetch failure")
-		}
-		return nil, err
-	}
-
-	ctxLogger.Info("Registry data fetched successfully from source",
-		"serverCount", fetchResult.ServerCount,
-		"format", fetchResult.Format,
-		"hash", fetchResult.Hash)
-
-	// Apply filtering if configured
-	if err := s.applyFilteringIfConfigured(ctx, mcpRegistry, fetchResult); err != nil {
-		return nil, err
-	}
-
-	return fetchResult, nil
-}
-
-// applyFilteringIfConfigured applies filtering to fetch result if registry has filter configuration
-func (s *DefaultSyncManager) applyFilteringIfConfigured(
-	ctx context.Context,
-	mcpRegistry *mcpv1alpha1.MCPRegistry,
-	fetchResult *sources.FetchResult) error {
-	ctxLogger := log.FromContext(ctx)
-
-	if mcpRegistry.Spec.Filter != nil {
-		ctxLogger.Info("Applying registry filters",
-			"hasNameFilters", mcpRegistry.Spec.Filter.NameFilters != nil,
-			"hasTagFilters", mcpRegistry.Spec.Filter.Tags != nil)
-
-		filteredRegistry, err := s.filterService.ApplyFilters(ctx, fetchResult.Registry, mcpRegistry.Spec.Filter)
-		if err != nil {
-			ctxLogger.Error(err, "Registry filtering failed")
-			if updateErr := s.updatePhaseFailedWithCondition(ctx, mcpRegistry,
-				fmt.Sprintf("Filtering failed: %v", err),
-				mcpv1alpha1.ConditionSyncSuccessful, conditionReasonFetchFailed, err.Error()); updateErr != nil {
-				ctxLogger.Error(updateErr, "Failed to update status after filtering failure")
-			}
-			return err
-		}
-
-		// Update fetch result with filtered data
-		originalServerCount := fetchResult.ServerCount
-		fetchResult.Registry = filteredRegistry
-		fetchResult.ServerCount = len(filteredRegistry.Servers) + len(filteredRegistry.RemoteServers)
-
-		ctxLogger.Info("Registry filtering completed",
-			"originalServerCount", originalServerCount,
-			"filteredServerCount", fetchResult.ServerCount,
-			"serversFiltered", originalServerCount-fetchResult.ServerCount)
-	} else {
-		ctxLogger.Info("No filtering configured, using original registry data")
-	}
-
-	return nil
-}
-
-// storeRegistryData stores the registry data using the storage manager
-func (s *DefaultSyncManager) storeRegistryData(
-	ctx context.Context,
-	mcpRegistry *mcpv1alpha1.MCPRegistry,
-	fetchResult *sources.FetchResult) error {
-	ctxLogger := log.FromContext(ctx)
-
-	if err := s.storageManager.Store(ctx, mcpRegistry, fetchResult.Registry); err != nil {
-		ctxLogger.Error(err, "Failed to store registry data")
-		if updateErr := s.updatePhaseFailedWithCondition(ctx, mcpRegistry,
-			fmt.Sprintf("Storage failed: %v", err),
-			mcpv1alpha1.ConditionSyncSuccessful, conditionReasonStorageFailed, err.Error()); updateErr != nil {
-			ctxLogger.Error(updateErr, "Failed to update status after storage failure")
-		}
-		return err
-	}
-
-	ctxLogger.Info("Registry data stored successfully",
-		"namespace", mcpRegistry.Namespace,
-		"registryName", mcpRegistry.Name)
-
-	return nil
-}
-
 // calculateRetryInterval calculates retry interval with exponential backoff
 func (*DefaultSyncManager) calculateRetryInterval(syncAttempts int) time.Duration {
 	// Base interval: 5 minutes
@@ -729,4 +579,38 @@ func (*DefaultSyncManager) calculateRetryInterval(syncAttempts int) time.Duratio
 
 	interval := baseInterval * time.Duration(1<<exponent) // 1<<n is 2^n
 	return min(interval, maxInterval)
+}
+
+// applyFilteringIfConfigured applies filtering to fetch result if registry has filter configuration
+func (s *DefaultSyncManager) applyFilteringIfConfigured(
+	ctx context.Context,
+	mcpRegistry *mcpv1alpha1.MCPRegistry,
+	fetchResult *sources.FetchResult) error {
+	ctxLogger := log.FromContext(ctx)
+
+	if mcpRegistry.Spec.Filter != nil {
+		ctxLogger.Info("Applying registry filters",
+			"hasNameFilters", mcpRegistry.Spec.Filter.NameFilters != nil,
+			"hasTagFilters", mcpRegistry.Spec.Filter.Tags != nil)
+
+		filteredRegistry, err := s.filterService.ApplyFilters(ctx, fetchResult.Registry, mcpRegistry.Spec.Filter)
+		if err != nil {
+			ctxLogger.Error(err, "Registry filtering failed")
+			return err
+		}
+
+		// Update fetch result with filtered data
+		originalServerCount := fetchResult.ServerCount
+		fetchResult.Registry = filteredRegistry
+		fetchResult.ServerCount = len(filteredRegistry.Servers) + len(filteredRegistry.RemoteServers)
+
+		ctxLogger.Info("Registry filtering completed",
+			"originalServerCount", originalServerCount,
+			"filteredServerCount", fetchResult.ServerCount,
+			"serversFiltered", originalServerCount-fetchResult.ServerCount)
+	} else {
+		ctxLogger.Info("No filtering configured, using original registry data")
+	}
+
+	return nil
 }

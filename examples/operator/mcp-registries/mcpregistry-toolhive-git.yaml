@@ -1,0 +1,17 @@
+  apiVersion: toolhive.stacklok.dev/v1alpha1
+  kind: MCPRegistry
+  metadata:
+    name: mcp-toolhive-registry
+    namespace: toolhive-system
+  spec:
+    source:
+      type: git
+      format: toolhive
+      git:
+        branch: main
+        repository: https://github.com/stacklok/toolhive/
+        path: pkg/registry/data/registry.json
+    filter:
+      tags:
+        include:
+          - "database"

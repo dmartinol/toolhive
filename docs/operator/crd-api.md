@@ -326,6 +326,7 @@ _Appears in:_
 | `serverCount` _integer_ | ServerCount is the total number of servers in the registry |  | Minimum: 0 <br /> |
 | `deployedServerCount` _integer_ | DeployedServerCount is the number of deployed servers with matching labels |  | Minimum: 0 <br /> |
 | `syncAttempts` _integer_ | SyncAttempts is the number of sync attempts since last success |  | Minimum: 0 <br /> |
+| `nextRetryTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.27/#time-v1-meta)_ | NextRetryTime is the earliest time when the next sync attempt should occur<br />Used to prevent aggressive retries after failures |  |  |
 | `apiEndpoint` _string_ | APIEndpoint is the URL of the registry API service |  |  |
 | `storageRef` _[StorageReference](#storagereference)_ | StorageRef is a reference to the internal storage location |  |  |
 | `lastManualSyncTrigger` _string_ | LastManualSyncTrigger tracks the last processed manual sync annotation value<br />Used to detect new manual sync requests via toolhive.stacklok.dev/sync-trigger annotation |  |  |

@@ -139,6 +139,8 @@ func (r *MCPRegistryReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 }
 
 // reconcileSync checks if sync is needed and performs it if necessary
+//
+//nolint:gocyclo
 func (r *MCPRegistryReconciler) reconcileSync(ctx context.Context, mcpRegistry *mcpv1alpha1.MCPRegistry) (ctrl.Result, error) {
 	ctxLogger := log.FromContext(ctx)
 
