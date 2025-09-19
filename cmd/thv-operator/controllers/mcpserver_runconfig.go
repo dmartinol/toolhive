@@ -23,6 +23,7 @@ import (
 	mcpv1alpha1 "github.com/stacklok/toolhive/cmd/thv-operator/api/v1alpha1"
 	"github.com/stacklok/toolhive/pkg/authz"
 	"github.com/stacklok/toolhive/pkg/logger"
+	"github.com/stacklok/toolhive/pkg/operator/accessors"
 	"github.com/stacklok/toolhive/pkg/runner"
 	transporttypes "github.com/stacklok/toolhive/pkg/transport/types"
 )
@@ -215,7 +216,8 @@ func (r *MCPServerReconciler) createRunConfigFromMCPServer(m *mcpv1alpha1.MCPSer
 	// Helper functions to convert MCPServer spec to builder format
 	envVars := convertEnvVarsFromMCPServer(m.Spec.Env)
 	volumes := convertVolumesFromMCPServer(m.Spec.Volumes)
-	secrets := convertSecretsFromMCPServer(m.Spec.Secrets)
+	// For ConfigMap mode, secrets are NOT included in runconfig - they're handled via k8s pod patch
+	// This avoids secrets provider errors in Kubernetes environment
 
 	// Get tool configuration from MCPToolConfig if referenced
 	toolsFilter := m.Spec.ToolsFilter
@@ -245,18 +247,10 @@ func (r *MCPServerReconciler) createRunConfigFromMCPServer(m *mcpv1alpha1.MCPSer
 		}
 	}
 
-	// Create K8s pod template patch if needed
+	// For ConfigMap mode, we don't put the K8s pod template patch in the runconfig.
+	// Instead, the operator will pass it via the --k8s-pod-patch CLI flag.
+	// This avoids redundancy and follows the same pattern as regular flags.
 	var k8sPodPatch string
-	if podSpec := NewMCPServerPodTemplateSpecBuilder(m.Spec.PodTemplateSpec).
-		WithServiceAccount(m.Spec.ServiceAccount).
-		WithSecrets(m.Spec.Secrets).
-		Build(); podSpec != nil {
-		if patch, err := json.Marshal(podSpec); err == nil {
-			k8sPodPatch = string(patch)
-		} else {
-			logger.Errorf("Failed to marshal pod template spec: %v", err)
-		}
-	}
 
 	proxyMode := m.Spec.ProxyMode
 	if proxyMode == "" {
@@ -273,7 +267,7 @@ func (r *MCPServerReconciler) createRunConfigFromMCPServer(m *mcpv1alpha1.MCPSer
 		runner.WithToolsFilter(toolsFilter),
 		runner.WithEnvVars(envVars),
 		runner.WithVolumes(volumes),
-		runner.WithSecrets(secrets),
+		// Secrets are NOT included in runconfig for ConfigMap mode - handled via k8s pod patch
 		runner.WithK8sPodPatch(k8sPodPatch),
 	}
 
@@ -317,6 +311,28 @@ func (r *MCPServerReconciler) createRunConfigFromMCPServer(m *mcpv1alpha1.MCPSer
 
 	// Add audit configuration if specified
 	addAuditConfigOptions(&options, m.Spec.Audit)
+
+	// Check for Vault Agent Injection and add env-file-dir if needed
+	vaultDetected := false
+
+	// Check for Vault injection in pod template annotations
+	if m.Spec.PodTemplateSpec != nil &&
+		m.Spec.PodTemplateSpec.Annotations != nil {
+		vaultDetected = hasVaultAgentInjection(m.Spec.PodTemplateSpec.Annotations)
+	}
+
+	// Also check resource overrides annotations using the accessor for safe access
+	if !vaultDetected {
+		accessor := accessors.NewMCPServerFieldAccessor()
+		_, annotations := accessor.GetProxyDeploymentTemplateLabelsAndAnnotations(m)
+		if len(annotations) > 0 {
+			vaultDetected = hasVaultAgentInjection(annotations)
+		}
+	}
+
+	if vaultDetected {
+		options = append(options, runner.WithEnvFileDir("/vault/secrets"))
+	}
 
 	// Use the RunConfigBuilder for operator context with full builder pattern
 	return runner.NewOperatorRunConfigBuilder(
@@ -546,22 +562,6 @@ func convertVolumesFromMCPServer(vols []mcpv1alpha1.Volume) []string {
 		volumes = append(volumes, volStr)
 	}
 	return volumes
-}
-
-// convertSecretsFromMCPServer converts MCPServer secrets to builder format
-func convertSecretsFromMCPServer(secs []mcpv1alpha1.SecretRef) []string {
-	if len(secs) == 0 {
-		return nil
-	}
-	secrets := make([]string, 0, len(secs))
-	for _, secret := range secs {
-		target := secret.TargetEnvName
-		if target == "" {
-			target = secret.Key
-		}
-		secrets = append(secrets, fmt.Sprintf("%s,target=%s", secret.Name, target))
-	}
-	return secrets
 }
 
 // addTelemetryConfigOptions adds telemetry configuration options to the builder options

@@ -123,22 +123,41 @@ tasks:
       - helm upgrade --install toolhive-operator deploy/charts/operator --namespace toolhive-system --create-namespace --kubeconfig kconfig.yaml
 
   operator-deploy-local:
-    desc: Build the ToolHive runtime and Operator image locally and deploy it to the K8s cluster
+    desc: |
+      Build the ToolHive runtime and Operator image locally and deploy it to the K8s cluster.
+      Set ENABLE_EXPERIMENTAL_FEATURES=true to enable experimental features in the operator
+      and automatically build and deploy the registry API image.
+      Example: task operator-deploy-local ENABLE_EXPERIMENTAL_FEATURES=true
     platforms: [linux, darwin]
     vars:
+      ENABLE_EXPERIMENTAL_FEATURES: '{{.ENABLE_EXPERIMENTAL_FEATURES | default "false"}}'
       OPERATOR_IMAGE:
         sh: KO_DOCKER_REPO=kind.local ko build --local -B ./cmd/thv-operator | tail -n 1
       TOOLHIVE_IMAGE:
         sh: KO_DOCKER_REPO=kind.local ko build --local -B ./cmd/thv-proxyrunner | tail -n 1
+      REGISTRY_API_IMAGE:
+        sh: |
+          if [ "{{.ENABLE_EXPERIMENTAL_FEATURES}}" = "true" ]; then
+            KO_DOCKER_REPO=kind.local ko build --local -B ./cmd/thv-registry-api | tail -n 1
+          else
+            echo ""
+          fi
     cmds:
       - echo "Loading toolhive operator image {{.OPERATOR_IMAGE}} into kind..."
       - kind load docker-image --name toolhive {{.OPERATOR_IMAGE}}
       - echo "Loading toolhive image {{.TOOLHIVE_IMAGE}} into kind..."
       - kind load docker-image --name toolhive {{.TOOLHIVE_IMAGE}}
       - |
+        if [ "{{.ENABLE_EXPERIMENTAL_FEATURES}}" = "true" ]; then
+          echo "Loading registry API image {{.REGISTRY_API_IMAGE}} into kind..."
+          kind load docker-image --name toolhive {{.REGISTRY_API_IMAGE}}
+        fi
+      - |
         helm upgrade --install toolhive-operator deploy/charts/operator \
         --set operator.image={{.OPERATOR_IMAGE}} \
         --set operator.toolhiveRunnerImage={{.TOOLHIVE_IMAGE}} \
+        --set operator.features.experimental={{.ENABLE_EXPERIMENTAL_FEATURES}} \
+        {{if eq .ENABLE_EXPERIMENTAL_FEATURES "true"}}--set registryAPI.image={{.REGISTRY_API_IMAGE}}{{end}} \
         --namespace toolhive-system \
         --create-namespace \
         --kubeconfig kconfig.yaml \
@@ -170,7 +189,7 @@ tasks:
         platforms: [windows]
         ignore_error: true   # Windows has no mkdir -p, so just ignore error if it exists
       - go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.17.3
-      - $(go env GOPATH)/bin/controller-gen crd webhook paths="./cmd/thv-operator/..." output:crd:artifacts:config=deploy/charts/operator-crds/templates
+      - $(go env GOPATH)/bin/controller-gen crd webhook paths="./cmd/thv-operator/..." output:crd:artifacts:config=deploy/charts/operator-crds/crds
       - $(go env GOPATH)/bin/controller-gen rbac:roleName=toolhive-operator-manager-role paths="./cmd/thv-operator/..." output:rbac:artifacts:config=deploy/charts/operator/templates/clusterrole
 
   operator-test:
@@ -182,6 +201,13 @@ tasks:
   operator-e2e-test:
     desc: Run E2E tests for the operator
     cmds:
+      - |
+        if [ -z "$CI" ]; then
+          if ! command -v chainsaw >/dev/null 2>&1; then
+            echo "Chainsaw not found, installing..."
+            go install github.com/kubernetes-sigs/chainsaw/cmd/chainsaw@latest
+          fi
+        fi
       - chainsaw test --test-dir test/e2e/chainsaw/operator/multi-tenancy/setup
       - chainsaw test --test-dir test/e2e/chainsaw/operator/multi-tenancy/test-scenarios
       - chainsaw test --test-dir test/e2e/chainsaw/operator/multi-tenancy/cleanup
